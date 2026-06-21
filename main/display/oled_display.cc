@@ -212,6 +212,10 @@ void OledDisplay::SetupUI_128x64() {
     lv_label_set_text(mute_label_, "");
     lv_obj_set_style_text_font(mute_label_, icon_font, 0);
 
+    alarm_label_ = lv_label_create(right_icons);
+    lv_label_set_text(alarm_label_, "");
+    lv_obj_set_style_text_font(alarm_label_, icon_font, 0);
+
     battery_label_ = lv_label_create(right_icons);
     lv_label_set_text(battery_label_, "");
     lv_obj_set_style_text_font(battery_label_, icon_font, 0);
@@ -360,6 +364,10 @@ void OledDisplay::SetupUI_128x32() {
     mute_label_ = lv_label_create(status_bar_);
     lv_label_set_text(mute_label_, "");
     lv_obj_set_style_text_font(mute_label_, icon_font, 0);
+
+    alarm_label_ = lv_label_create(status_bar_);
+    lv_label_set_text(alarm_label_, "");
+    lv_obj_set_style_text_font(alarm_label_, icon_font, 0);
 
     network_label_ = lv_label_create(status_bar_);
     lv_label_set_text(network_label_, "");

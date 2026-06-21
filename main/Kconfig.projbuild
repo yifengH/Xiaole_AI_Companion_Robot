@@ -6,6 +6,35 @@ config OTA_URL
     help
         The application will access this URL to check for new firmwares and server address.
 
+config DEVICE_BOOTSTRAP_URL
+    string "Self-hosted device Bootstrap URL"
+    default "https://api.lmcl.xyz/grpc-gateway/CompanionDeviceService/Bootstrap"
+    help
+        When set, the websocket protocol will POST {sn, secret} to this URL,
+        read data.deviceToken and data.config.endpoints.websocket from the
+        response, then connect to the websocket endpoint with ?token=.
+        This follows the self-hosted server device access contract.
+
+config DEVICE_FACTORY_SECRET
+    string "Development factory secret"
+    default ""
+    help
+        Development fallback for the device factory secret used by Bootstrap.
+        Production builds should store a per-device random secret in NVS key
+        websocket.secret instead of using a shared sdkconfig value.
+
+config DEVICE_MODEL_CODE
+    string "Device Model Code (deviceModelCode)"
+    default "lmcl-box-v1"
+    help
+        Default model code reported in the status frame for the self-hosted server.
+
+config LMCL_SN_PREFIX
+    string "LMCL Serial Number prefix"
+    default "lmcl-"
+    help
+        Prefix used by the MAC-derived LMCL serial number.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE
@@ -790,18 +819,16 @@ config USE_AUDIO_PROCESSOR
         Requires ESP32 S3 and PSRAM
 
 config USE_DEVICE_AEC
-    bool "Enable Device-Side AEC"
-    default n
-        depends on USE_AUDIO_PROCESSOR && (BOARD_TYPE_ESP_BOX_3 || BOARD_TYPE_ESP_BOX || BOARD_TYPE_ESP_BOX_LITE \
-        || BOARD_TYPE_LICHUANG_DEV_S3 || BOARD_TYPE_ESP_KORVO2_V3 || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75|| BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_1_75C || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_83\
-        || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_AMOLED_2_06 || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_4B || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_4B || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_4_3 \
-        || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_7B \
-        || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_3_4C || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_4C || BOARD_TYPE_ESP_S3_LCD_EV_Board_2 || BOARD_TYPE_YUNLIAO_S3 \
-        || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_7 || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_8 || BOARD_TYPE_WAVESHARE_ESP32_P4_WIFI6_TOUCH_LCD_10_1 \
-        || BOARD_TYPE_ESP_VOCAT || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_3_49 || BOARD_TYPE_WAVESHARE_ESP32_S3_RLCD_4_2 || BOARD_TYPE_ZHENGCHEN_CAM || BOARD_TYPE_ZHENGCHEN_CAM_ML307 \
-        || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_4_3C || BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_1_54 || BOARD_TYPE_WAVESHARE_ESP32_S3_LCD_0_85)
+    bool "启用设备端回声消除(AEC)"
+    default y
     help
-        To work properly, device-side AEC requires a clean output reference path from the speaker signal and physical acoustic isolation between the microphone and speaker.
+       要确保设备端回声消除(AEC)正常工作，必须满足两个条件：首先需要从扬声器信号中获取纯净的输出参考路径，其次要实现麦克风与扬声器之间的物理声学隔离.
+
+config USE_REALTIME_CHAT
+    bool "启用可语音打断的实时对话模式（需要 AEC 支持）"
+    default y
+    help
+        可语音打断的实时对话模式，需要 ESP32 S3 与 AEC 开启，因为性能不够，不建议和微信聊天界面风格同时开启
 
 config USE_SERVER_AEC
     bool "Enable Server-Side AEC (Unstable)"
@@ -948,6 +975,29 @@ menu "TAIJIPAI_S3_CONFIG"
     default y
     help
         启动双声道
+endmenu
+
+menu "Alarm Settings"
+    config ALARM_RING_INTERVAL_SECONDS
+        int "Ring interval between successive alarm sounds (seconds)"
+        default 8
+        range 3 60
+        help
+            每次闹钟铃声播放完后，等待多少秒再播放下一遍。
+
+    config ALARM_GAIN_PERCENT
+        int "Alarm playback gain (%)"
+        default 180
+        range 50 250
+        help
+            闹钟音量放大系数（百分比）。100=原始音量，180=放大80%，50=减小50%。
+
+    config ALARM_NOTIFICATION_DURATION_MS
+        int "Screen notification display duration (ms)"
+        default 8000
+        range 1000 30000
+        help
+            每次响铃时屏幕通知消息的显示持续时长（毫秒）。
 endmenu
 
 endmenu

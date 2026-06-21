@@ -36,9 +36,9 @@
  * 
  */
 
-#define OPUS_FRAME_DURATION_MS 60
-#define MAX_ENCODE_TASKS_IN_QUEUE 2
-#define MAX_PLAYBACK_TASKS_IN_QUEUE 2
+#define OPUS_FRAME_DURATION_MS 20
+#define MAX_ENCODE_TASKS_IN_QUEUE 8
+#define MAX_PLAYBACK_TASKS_IN_QUEUE 16
 #define MAX_DECODE_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
@@ -93,6 +93,8 @@ struct AudioTask {
     AudioTaskType type;
     std::vector<int16_t> pcm;
     uint32_t timestamp;
+    bool ducking_eligible = false;
+    int playback_gain_percent = 100;
 };
 
 struct DebugStatistics {
@@ -129,7 +131,7 @@ public:
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
-    void PlaySound(const std::string_view& sound);
+    void PlaySound(const std::string_view& sound, bool wait_if_busy = true, bool ducking_eligible = false, int gain_percent = 100);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
@@ -187,7 +189,7 @@ private:
     void AudioInputTask();
     void AudioOutputTask();
     void OpusCodecTask();
-    void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
+    void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm, bool wait_for_slot = true);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();
 };

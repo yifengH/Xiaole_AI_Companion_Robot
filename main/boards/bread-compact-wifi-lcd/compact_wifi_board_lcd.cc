@@ -7,6 +7,7 @@
 #include "config.h"
 #include "mcp_server.h"
 #include "lamp_controller.h"
+#include "dfplayer_controller.h"
 #include "led/single_led.h"
 
 #include <esp_log.h>
@@ -15,6 +16,10 @@
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <driver/spi_common.h>
+
+// 继电器与开关灯，必须要加入这两行代码
+#include "jidian_G.h"   // jidian
+#include "lamp_G.h"     //  LED lamp
 
 #if defined(LCD_TYPE_ILI9341_SERIAL)
 #include "esp_lcd_ili9341.h"
@@ -135,7 +140,10 @@ private:
 
     // 物联网初始化，添加对 AI 可见设备
     void InitializeTools() {
-        static LampController lamp(LAMP_GPIO);
+        // static LampController lamp(LAMP_GPIO);
+        //  static LED_Lamp lamp_G(GPIO_NUM_17);        // 1. 实例化 LED_Lamp 对象，GPIO_NUM_17 是连接LED灯的GPIO引脚，根据实际连接修改
+        static jidian_Lamp jidian_G(GPIO_NUM_12);   // 2. 实例化 jidian_Lamp 对象，GPIO_NUM_12 是连接继电器的GPIO引脚，根据实际连接修改
+        static DfplayerController dfplayer;  // 3. 实例化 DfplayerController 对象，DFPLAYER_GPIO 是连接DFPlayer模块的GPIO引脚，根据实际连接修改
     }
 
 public:

@@ -20,6 +20,8 @@ public:
     virtual void SetStatus(const char* status);
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
     virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
+    virtual void ShowAlarmOverlay(const char* message, int duration_ms = 3000) override;
+    virtual void HideAlarmOverlay() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image);
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
@@ -32,6 +34,7 @@ protected:
     lv_obj_t *network_label_ = nullptr;
     lv_obj_t *status_label_ = nullptr;
     lv_obj_t *notification_label_ = nullptr;
+    lv_obj_t *alarm_label_ = nullptr;
     lv_obj_t *mute_label_ = nullptr;
     lv_obj_t *battery_label_ = nullptr;
     lv_obj_t* low_battery_popup_ = nullptr;
@@ -39,10 +42,18 @@ protected:
     
     const char* battery_icon_ = nullptr;
     const char* network_icon_ = nullptr;
+    bool alarm_icon_visible_ = false;
     bool muted_ = false;
 
     std::chrono::system_clock::time_point last_status_update_time_;
     esp_timer_handle_t notification_timer_ = nullptr;
+    esp_timer_handle_t alarm_overlay_timer_ = nullptr;
+    lv_obj_t* alarm_overlay_ = nullptr;
+    lv_obj_t* alarm_overlay_label_ = nullptr;
+    bool alarm_overlay_visible_ = false;
+
+    void EnsureAlarmOverlay();
+    void UpdateAlarmOverlayLayout();
 
     friend class DisplayLockGuard;
     virtual bool Lock(int timeout_ms = 0) = 0;

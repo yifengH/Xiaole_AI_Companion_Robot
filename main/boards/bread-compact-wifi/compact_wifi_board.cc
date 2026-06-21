@@ -15,6 +15,10 @@
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
 
+// 继电器与开关灯，必须要加入这两行代码
+#include "jidian_G.h"   // jidian
+#include "lamp_G.h"     //  LED lamp
+
 #ifdef SH1106
 #include <esp_lcd_panel_sh1106.h>
 #endif
@@ -149,7 +153,9 @@ private:
 
     // 物联网初始化，逐步迁移到 MCP 协议
     void InitializeTools() {
-        static LampController lamp(LAMP_GPIO);
+        // static LampController lamp(LAMP_GPIO);
+        static LED_Lamp lamp_G(GPIO_NUM_17);        // 1. 实例化 LED_Lamp 对象，GPIO_NUM_17 是连接LED灯的GPIO引脚，根据实际连接修改
+        static jidian_Lamp jidian_G(GPIO_NUM_12);   // 2. 实例化 jidian_Lamp 对象，GPIO_NUM_12 是连接继电器的GPIO引脚，根据实际连接修改
     }
 
 public:

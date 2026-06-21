@@ -11,6 +11,8 @@ struct AudioStreamPacket {
     int sample_rate = 0;
     int frame_duration = 0;
     uint32_t timestamp = 0;
+    bool ducking_eligible = false;
+    int playback_gain_percent = 100;
     std::vector<uint8_t> payload;
 };
 
@@ -84,7 +86,7 @@ protected:
     std::function<void()> on_disconnected_;
 
     int server_sample_rate_ = 24000;
-    int server_frame_duration_ = 60;
+    int server_frame_duration_ = 20;
     bool error_occurred_ = false;
     std::string session_id_;
     std::chrono::time_point<std::chrono::steady_clock> last_incoming_time_;

@@ -138,6 +138,8 @@ private:
 
     bool has_server_time_ = false;
     bool aborted_ = false;
+    bool tts_audio_active_ = false;
+    bool tts_stop_received_ = false;
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;

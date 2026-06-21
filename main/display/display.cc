@@ -32,6 +32,13 @@ void Display::ShowNotification(const char* notification, int duration_ms) {
     ESP_LOGW(TAG, "ShowNotification: %s", notification);
 }
 
+void Display::ShowAlarmOverlay(const char* message, int duration_ms) {
+    ShowNotification(message, duration_ms);
+}
+
+void Display::HideAlarmOverlay() {
+}
+
 void Display::UpdateStatusBar(bool update_all) {
 }
 

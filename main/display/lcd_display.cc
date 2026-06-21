@@ -418,6 +418,11 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_font(mute_label_, icon_font, 0);
     lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
 
+    alarm_label_ = lv_label_create(right_icons);
+    lv_label_set_text(alarm_label_, "");
+    lv_obj_set_style_text_font(alarm_label_, icon_font, 0);
+    lv_obj_set_style_text_color(alarm_label_, lvgl_theme->text_color(), 0);
+
     battery_label_ = lv_label_create(right_icons);
     lv_label_set_text(battery_label_, "");
     lv_obj_set_style_text_font(battery_label_, icon_font, 0);
@@ -889,6 +894,11 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_font(mute_label_, icon_font, 0);
     lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);
 
+    alarm_label_ = lv_label_create(right_icons);
+    lv_label_set_text(alarm_label_, "");
+    lv_obj_set_style_text_font(alarm_label_, icon_font, 0);
+    lv_obj_set_style_text_color(alarm_label_, lvgl_theme->text_color(), 0);
+
     battery_label_ = lv_label_create(right_icons);
     lv_label_set_text(battery_label_, "");
     lv_obj_set_style_text_font(battery_label_, icon_font, 0);
@@ -1164,10 +1174,12 @@ void LcdDisplay::SetTheme(Theme* theme) {
 
     if (text_font->line_height >= 40) {
         lv_obj_set_style_text_font(mute_label_, large_icon_font, 0);
+        lv_obj_set_style_text_font(alarm_label_, large_icon_font, 0);
         lv_obj_set_style_text_font(battery_label_, large_icon_font, 0);
         lv_obj_set_style_text_font(network_label_, large_icon_font, 0);
     } else {
         lv_obj_set_style_text_font(mute_label_, icon_font, 0);
+        lv_obj_set_style_text_font(alarm_label_, icon_font, 0);
         lv_obj_set_style_text_font(battery_label_, icon_font, 0);
         lv_obj_set_style_text_font(network_label_, icon_font, 0);
     }
@@ -1192,6 +1204,7 @@ void LcdDisplay::SetTheme(Theme* theme) {
     
     // Update status bar elements
     lv_obj_set_style_text_color(network_label_, lvgl_theme->text_color(), 0);
+    lv_obj_set_style_text_color(alarm_label_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_text_color(status_label_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_text_color(notification_label_, lvgl_theme->text_color(), 0);
     lv_obj_set_style_text_color(mute_label_, lvgl_theme->text_color(), 0);

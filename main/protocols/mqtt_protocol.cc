@@ -321,7 +321,11 @@ std::string MqttProtocol::GetHelloMessage() {
 
 void MqttProtocol::ParseServerHello(const cJSON* root) {
     auto transport = cJSON_GetObjectItem(root, "transport");
-    if (transport == nullptr || strcmp(transport->valuestring, "udp") != 0) {
+    if (!cJSON_IsString(transport)) {
+        ESP_LOGE(TAG, "Missing or invalid transport in server hello");
+        return;
+    }
+    if (strcmp(transport->valuestring, "udp") != 0) {
         ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
         return;
     }
@@ -350,16 +354,33 @@ void MqttProtocol::ParseServerHello(const cJSON* root) {
         ESP_LOGE(TAG, "UDP is not specified");
         return;
     }
-    udp_server_ = cJSON_GetObjectItem(udp, "server")->valuestring;
-    udp_port_ = cJSON_GetObjectItem(udp, "port")->valueint;
-    auto key = cJSON_GetObjectItem(udp, "key")->valuestring;
-    auto nonce = cJSON_GetObjectItem(udp, "nonce")->valuestring;
+
+    auto server = cJSON_GetObjectItem(udp, "server");
+    auto port = cJSON_GetObjectItem(udp, "port");
+    auto key = cJSON_GetObjectItem(udp, "key");
+    auto nonce = cJSON_GetObjectItem(udp, "nonce");
+    if (!cJSON_IsString(server) || !cJSON_IsNumber(port) || !cJSON_IsString(key) || !cJSON_IsString(nonce)) {
+        ESP_LOGE(TAG, "Invalid UDP configuration in server hello");
+        return;
+    }
+
+    udp_server_ = server->valuestring;
+    udp_port_ = port->valueint;
 
     // auto encryption = cJSON_GetObjectItem(udp, "encryption")->valuestring;
     // ESP_LOGI(TAG, "UDP server: %s, port: %d, encryption: %s", udp_server_.c_str(), udp_port_, encryption);
-    aes_nonce_ = DecodeHexString(nonce);
+    aes_nonce_ = DecodeHexString(nonce->valuestring);
+    if (aes_nonce_.size() != 16) {
+        ESP_LOGE(TAG, "Invalid nonce length: %u", (unsigned)aes_nonce_.size());
+        return;
+    }
     mbedtls_aes_init(&aes_ctx_);
-    mbedtls_aes_setkey_enc(&aes_ctx_, (const unsigned char*)DecodeHexString(key).c_str(), 128);
+    auto decoded_key = DecodeHexString(key->valuestring);
+    if (decoded_key.size() != 16) {
+        ESP_LOGE(TAG, "Invalid key length: %u", (unsigned)decoded_key.size());
+        return;
+    }
+    mbedtls_aes_setkey_enc(&aes_ctx_, (const unsigned char*)decoded_key.c_str(), 128);
     local_sequence_ = 0;
     remote_sequence_ = 0;
     xEventGroupSetBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);

@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI陪伴机器人 · 设备端联调 demo</title>
+<style>
+  :root{--bg:#0f1115;--pan:#1a1d24;--line:#2a2f3a;--fg:#e6e9ef;--mut:#8a91a0;--acc:#4f8cff;--ok:#39c46e;--err:#ff5c5c}
+  *{box-sizing:border-box}
+  body{margin:0;height:100vh;display:flex;flex-direction:column;font:13px/1.5 system-ui,"Microsoft YaHei",sans-serif;background:var(--bg);color:var(--fg)}
+  header{padding:8px 14px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center}
+  header h1{font-size:14px;margin:0}
+  .badge{font-size:12px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);color:var(--mut)}
+  .badge.on{color:var(--ok);border-color:var(--ok)} .badge.err{color:var(--err);border-color:var(--err)}
+  main{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:10px 14px;min-height:0}
+  .pan{background:var(--pan);border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;min-height:0}
+  .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+  label{color:var(--mut);font-size:12px} .mut{color:var(--mut);font-size:12px}
+  input{flex:1;min-width:90px;background:#0c0e12;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:5px 7px}
+  button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:6px 10px;cursor:pointer}
+  button.g{background:transparent;border:1px solid var(--line);color:var(--fg)} button:disabled{opacity:.4;cursor:not-allowed}
+  .step{border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:8px}
+  .sno{display:inline-block;width:18px;text-align:center;border-radius:50%;background:var(--acc);color:#fff;font-size:12px;margin-right:4px}
+  .out{margin-top:6px;font:11px/1.6 ui-monospace,Consolas,monospace;color:#cfd6e4;white-space:pre-wrap;word-break:break-all}
+  #log{font:11px/1.5 ui-monospace,Consolas,monospace;height:calc(100% - 26px);overflow:auto}
+  .l{white-space:pre-wrap;word-break:break-all} .l.tx{color:#7fb0ff} .l.rx{color:#9ad29a} .l.sys{color:var(--mut)} .l.err{color:var(--err)}
+  code{color:var(--acc)}
+</style>
+</head>
+<body>
+<header>
+  <h1>AI陪伴机器人 · 设备端联调 demo</h1>
+  <span id="bConn" class="badge">未连接</span>
+  <span id="bState" class="badge">—</span>
+  <span class="mut">设备只硬烧 Bootstrap 地址;WS 地址等由它下发</span>
+  <span class="mut" style="margin-left:auto">💓 常驻连接由服务端每~60s 发 WS ping 保活,浏览器自动回 pong;真机需保持连接</span>
+</header>
+<div class="mut" style="padding:5px 14px;border-bottom:1px solid var(--line);background:#15171c">
+  ⚠ 本页是<b>浏览器联调台</b>,有两处是浏览器假货、<b>真机别照搬</b>:① 用 WebCodecs 编解码 Opus(真机用 libopus 裸包) ② <code>echoCancellation</code> 不是真机 AEC(真机必须自做回声消除,见文档 §9)。其余都与真机一致、照搬即可——连 WS 把令牌拼在 <code>?token=</code> 后、JSON 帧 + 二进制帧。
+</div>
+<main>
+  <section class="pan">
+    <div class="row"><label>SN</label><input id="sn" value="web-demo-sn-001"><label>密码</label><input id="secret" value="web-demo-secret-001"><label>设备型号</label><input id="model" placeholder="deviceModelCode,如 lmcl-box-v1(随 status 上报,用于 OTA)"><label>固件版本</label><input id="fw_ver" value="1.0.0" style="max-width:120px"></div>
+    <div class="row mut">SN/密码 → Bootstrap;设备型号/固件版本 → 随 status 帧上报、固件版本同时用于 checkUpdate(均不进 Bootstrap)。</div>
+    <div class="row"><label>Bootstrap</label><input id="boot"></div>
+
+    <!-- ① 上电首调:sn+出厂密码自证(首次=自动注册)→ 换令牌 + 下发 WS 地址 -->
+    <div class="step">
+      <div class="row"><span class="sno">1</span><b>Bootstrap</b><span class="mut">sn+密码换令牌 + 接收 WS 地址</span><button id="b1" style="margin-left:auto">调用</button></div>
+      <div id="o1" class="out">未调用</div>
+    </div>
+    <!-- ② 用①下发地址 + ?token=令牌连 WS:可信即可连。已绑定→直接语音;未绑定→进配对态收 pairingCode,绑定后收 bound+hello -->
+    <div class="step">
+      <div class="row"><span class="sno">2</span><b>连接 WebSocket</b><span class="mut">用①下发地址 + 令牌</span><button id="b2" style="margin-left:auto" disabled>连接</button></div>
+      <div class="row"><label>WS</label><input id="ws" placeholder="①下发后自动填入"></div>
+      <div id="oPair" class="out">连接后:已绑定→直接语音就绪;未绑定→这里显示配对码,去 App 输入绑定,绑定成功会实时收到 bound</div>
+    </div>
+    <!-- ③ 唤醒→说话(停顿即一轮,服务端 VAD 断句)→可随时打断 -->
+    <div class="step">
+      <div class="row"><span class="sno">3</span><b>通话</b><span class="mut">唤醒后常开麦,停顿即一轮,可打断</span></div>
+      <div class="row"><button id="b3" disabled>🎙 唤醒说话</button><button id="bAb" class="g" disabled>打断</button></div>
+      <div id="tr" class="out" style="max-height:34vh"></div>
+    </div>
+
+    <!-- ④ 状态上报:常驻连接周期上报设备快照(wifi/电量/电源/定位 + 任意 extra),服务端落最新。 -->
+    <div class="step">
+      <div class="row"><span class="sno">4</span><b>状态上报</b><span class="mut">status 帧 · 周期上报设备快照</span></div>
+      <div class="row"><label>wifiSsid</label><input id="st_ssid" value="demo-wifi"><label>wifiPassword</label><input id="st_pwd" value="12345678"></div>
+      <div class="row"><label>batteryLevel</label><input id="st_bat" type="number" min="0" max="100" value="88"><label>powerSource</label><select id="st_pow" style="flex:1;min-width:90px;background:#0c0e12;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:5px 7px"><option value="0">0 未知</option><option value="1">1 电池</option><option value="2" selected>2 插电</option></select></div>
+      <div class="row"><label>latitude</label><input id="st_lat" type="number" step="any" value="31.2304"><label>longitude</label><input id="st_lng" type="number" step="any" value="121.4737"></div>
+      <div class="row"><label>extra(JSON)</label><span class="mut">键和值都必须是字符串,数字也写成 "36.5",否则整条 status 被后端丢弃</span></div>
+      <div class="row"><textarea id="st_extra" placeholder='选填,如 {"temp":"36.5","mode":"home"}' style="flex:1;min-width:90px;background:#0c0e12;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:5px 7px;font:11px/1.5 ui-monospace,Consolas,monospace" rows="2"></textarea></div>
+      <div class="row"><button id="bSt" disabled>发送 status</button><label><input id="st_auto" type="checkbox"> 每</label><input id="st_int" type="number" min="1" value="10" style="max-width:64px"><label>秒自动发</label></div>
+      <div id="oSt" class="out">未发送</div>
+    </div>
+
+    <!-- ⑤ 检测更新:上报当前 version,服务端按型号查当前发布版,回 update 帧(相同则设备不动)。 -->
+    <div class="step">
+      <div class="row"><span class="sno">5</span><b>检测更新</b><span class="mut">checkUpdate 帧 · 回 update 帧</span></div>
+      <div class="row"><span class="mut">用上面 ① 填的「固件版本」作为当前版本(改它即可模拟不同版本)</span><button id="bCu" disabled>发送 checkUpdate</button></div>
+      <div id="oCu" class="out">未检测</div>
+    </div>
+  </section>
+  <aside class="pan">
+    <div class="row"><b>协议原始日志</b><button id="bClr" class="g" style="margin-left:auto;padding:3px 8px">清空</button></div>
+    <div id="log"></div>
+  </aside>
+</main>
+<script>
+// ===== 设备端联调 demo:全流程 = ① Bootstrap → ② 连 WS → ③ 通话。每步可单独点,请求/结果都打在右栏日志。 =====
+// WS 帧:文本帧 = JSON 控制消息;二进制帧 = 1 字节类型 + 载荷,0x01 = Opus 音频。下行 24k、上行 16k。
+const FA = 0x01, UP = 16000, DOWN = 24000, BR = 24000;
+const $ = id => document.getElementById(id);
+let ws = null, boot = null, talking = false, playing = [], discardTail = false;
+let encCtx, mic, enc, encN = 0, dec, playCtx, cursor = 0, decTs = 0;
+
+$('boot').value = (location.protocol.startsWith('http') ? location.origin : 'http://localhost:8080') + '/grpc-gateway/CompanionDeviceService/Bootstrap';
+if (!window.AudioEncoder) log('err', '需较新的 Chrome/Edge(WebCodecs Opus)');
+
+function log(k, m) { const d = document.createElement('div'); d.className = 'l ' + k; d.textContent = '[' + new Date().toLocaleTimeString() + '] ' + k.toUpperCase() + ' ' + (typeof m === 'string' ? m : JSON.stringify(m)); $('log').append(d); $('log').scrollTop = 1e9; }
+function tr(who, t) { const d = document.createElement('div'); d.textContent = (who === 'u' ? '🧑 ' : '🤖 ') + t; $('tr').append(d); $('tr').scrollTop = 1e9; }
+// 助手字幕:LLM 文本增量(token 级)流式到达,逐字追加到「当前这条助手气泡」;一轮收束(用户新说话 / 本轮 stop)后置空,下一轮新开一条。
+let aBubble = null;
+function aDelta(t) { if (!aBubble) { aBubble = document.createElement('div'); aBubble.textContent = '🤖 '; $('tr').append(aBubble); } aBubble.textContent += t; $('tr').scrollTop = 1e9; }
+function aEnd() { aBubble = null; }
+$('bClr').onclick = () => $('log').innerHTML = '';
+
+// ===== ① Bootstrap:设备上电首调。纯传输层认证:sn+出厂密码自证(首次=自动注册),换令牌 + 下发 WS 地址。 =====
+$('b1').onclick = async () => {
+  $('b1').disabled = true;
+  try {
+    const body = { sn: $('sn').value.trim(), secret: $('secret').value.trim() };
+    log('tx', 'POST Bootstrap ' + JSON.stringify({ ...body, secret: '***' }));
+    const r = await fetch($('boot').value.trim(), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const e = await r.json();                                  // 网关统一信封 {code,message,data}
+    if (e.code !== 0 || !e.data || !e.data.deviceToken) throw new Error(e.message || ('HTTP ' + r.status));
+    boot = e.data;
+    const wsUrl = (boot.config && boot.config.endpoints && boot.config.endpoints.websocket) || '';
+    // 把①下发的地址 + 令牌拼成「实际要连的完整 URL」回填:所见即所连。鉴权只有一种:令牌拼在 ?token=(URL 编码)。
+    $('ws').value = wsUrl ? wsUrl.replace(/\/+$/, '/') + '?token=' + encodeURIComponent(boot.deviceToken) : '';
+    log('rx', { token: boot.deviceToken.slice(0, 16) + '…', expiresIn: boot.expiresIn, ws: wsUrl });
+    $('o1').textContent = '令牌 ' + boot.deviceToken.slice(0, 22) + '…  有效 ' + boot.expiresIn + 's\n下发 websocket  ' + wsUrl
+      + '\n② 连接地址已自动拼好 ?token= 待连(绑定与否在连上后才知道)';
+    $('b2').disabled = !boot.deviceToken;
+  } catch (err) { log('err', 'Bootstrap ' + err); $('o1').textContent = '❌ ' + err; boot = null; $('b2').disabled = true; }
+  finally { $('b1').disabled = false; }
+};
+
+// ===== ② 连 WS:用输入框里「①已拼好 ?token= 的完整地址」发起连接。可信即可连——已绑定→服务端发 hello 启用语音;未绑定→服务端发 pairingCode。 =====
+$('b2').onclick = () => ws ? ws.close() : connect();
+function connect() {
+  const u = $('ws').value.trim();
+  log('sys', 'connect ' + u);
+  ws = new WebSocket(u); ws.binaryType = 'arraybuffer';
+  // 连上即进控制层:status/checkUpdate 立即可用(b3 通话要等服务端 hello = 语音就绪才开)。
+  ws.onopen = () => { $('bConn').textContent = '已连接'; $('bConn').className = 'badge on'; $('b2').textContent = '断开'; $('bSt').disabled = false; $('bCu').disabled = false; $('oPair').textContent = '已连接,等待服务端帧:pairingCode(未绑定)或 hello(已绑定→语音就绪)'; send('hello'); };
+  ws.onmessage = onMsg;
+  ws.onclose = e => { log('sys', 'closed ' + e.code); teardown(); };
+  ws.onerror = () => { log('err', 'ws error'); $('bConn').textContent = '错误'; $('bConn').className = 'badge err'; };
+}
+function teardown() {
+  ws = null; talking = false; $('bConn').textContent = '未连接'; $('bConn').className = 'badge'; $('b2').textContent = '连接';
+  $('b2').disabled = !(boot && boot.deviceToken); $('b3').disabled = true; $('b3').textContent = '🎙 唤醒说话'; $('bAb').disabled = true; stopMic();
+  $('bSt').disabled = true; $('bCu').disabled = true; stopAutoStatus(); discardTail = false; aEnd();   // 断开:停掉周期上报、复位丢弃开关、收束未完气泡
+  $('bState').textContent = '—'; $('bState').className = 'badge'; $('oPair').textContent = '未连接';
+}
+// 统一信封:{type, data}。无 data 的帧(abort)只发 {type}。
+function send(type, data) { if (ws && ws.readyState === 1) { const o = data === undefined ? { type } : { type, data }; ws.send(JSON.stringify(o)); log('tx', o); } }
+function onMsg(ev) {
+  if (typeof ev.data === 'string') {                           // 控制消息:pairingCode / bound / hello / stt / tts / sleep / error / update
+    const m = JSON.parse(ev.data); log('rx', m);
+    const d = m.data || {};                                      // 统一信封:业务字段都在 data 里(lowerCamelCase)
+    // 配对态:未绑定连上后服务端下发配对码(到期会自动下发新码);去 App 输入它绑定。
+    if (m.type === 'pairingCode') { $('bState').textContent = '待配对'; $('bState').className = 'badge'; $('oPair').innerHTML = '配对码 <code>' + d.code + '</code>(' + d.ttlSeconds + 's 内有效)→ 去 App 输入绑定;到期服务端会自动下发新码'; }
+    // 绑定成功:服务端实时推送(随后会发 hello 启用语音)。
+    else if (m.type === 'bound') { $('bState').textContent = '已绑定'; $('bState').className = 'badge on'; $('oPair').textContent = '✅ 绑定成功 userId=' + d.userId + ',语音即将就绪…'; }
+    // 服务端 hello = 语音能力就绪(已绑定):此刻才放开通话。
+    else if (m.type === 'hello') { $('b3').disabled = false; $('bState').textContent = '语音就绪'; $('bState').className = 'badge on'; $('oPair').textContent = '语音就绪(收到服务端 hello),可唤醒说话'; }
+    // 文档打断状态机:收 stt(播放中)→停播+开「丢弃残帧」;收 tts.start→复位;别用 tts.stop 驱动复位(被打断的轮没有 stop)。
+    else if (m.type === 'stt') { if (isPlaying()) { stopPlay(); discardTail = true; } if (d.final && d.text) { tr('u', d.text); aEnd(); } }  // 用户定稿=新一轮:收束上一条助手气泡
+    else if (m.type === 'tts' && d.state === 'start') discardTail = false;   // 新一轮开播:复位丢弃开关
+    else if (m.type === 'tts' && d.state === 'sentence' && d.text) aDelta(d.text);   // 助手字幕增量:流式逐字追加(与音频解耦,可能早于 tts.start 就开始到)
+    else if (m.type === 'tts' && d.state === 'stop') aEnd();   // 本轮正常收尾:收束气泡(不拿它驱动播放复位)
+    else if (m.type === 'sleep') { talking = false; $('b3').textContent = '🎙 唤醒说话'; $('bAb').disabled = true; }
+    else if (m.type === 'update') showUpdate(d);                // 检测更新结果(有/无新版本)
+    return;
+  }
+  // 0x01 = 下行 Opus 音频;「丢弃残帧」开着时(被打断那一轮的尾巴)直接丢,直到下一条 tts.start 复位。
+  const b = new Uint8Array(ev.data); if (b[0] === FA && !discardTail) playOpus(b.slice(1));
+}
+
+// ===== ③ 通话:唤醒(listen/start)后麦克风常开,Opus 帧上行;服务端 VAD 自动断句;abort 打断。 =====
+$('b3').onclick = () => talking ? stop() : start();
+$('bAb').onclick = () => { send('abort'); stopPlay(); discardTail = true; };  // 文档 §8:本地停播 + 丢弃残帧
+async function start() { await startMic(); talking = true; $('b3').textContent = '⏹ 停止'; $('bAb').disabled = false; send('listen', { state: 'start' }); }
+function stop() { talking = false; $('b3').textContent = '🎙 唤醒说话'; $('bAb').disabled = true; stopMic(); }
+
+// 上行:mic → 16k PCM → Opus 帧(每帧前置 0x01)→ WS
+async function startMic() {
+  if (encCtx) return;
+  mic = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  encCtx = new AudioContext({ sampleRate: UP }); await encCtx.resume(); ensurePlay();
+  enc = new AudioEncoder({ output: c => { const b = new Uint8Array(c.byteLength); c.copyTo(b); if (ws && ws.readyState === 1) { const f = new Uint8Array(1 + b.length); f[0] = FA; f.set(b, 1); ws.send(f.buffer); } }, error: e => log('err', 'enc ' + e) });
+  enc.configure({ codec: 'opus', sampleRate: UP, numberOfChannels: 1, bitrate: BR }); encN = 0;
+  const src = encCtx.createMediaStreamSource(mic), p = encCtx.createScriptProcessor(2048, 1, 1);
+  p.onaudioprocess = ev => {
+    if (!talking) return;
+    const d = new Float32Array(ev.inputBuffer.getChannelData(0)), ts = Math.round(encN / UP * 1e6); encN += d.length;
+    try { enc.encode(new AudioData({ format: 'f32-planar', sampleRate: UP, numberOfFrames: d.length, numberOfChannels: 1, timestamp: ts, data: d })); } catch (_) {}
+  };
+  src.connect(p); const g = encCtx.createGain(); g.gain.value = 0; p.connect(g); g.connect(encCtx.destination);
+}
+function stopMic() { if (mic) { mic.getTracks().forEach(t => t.stop()); mic = null; } if (enc) { try { enc.close(); } catch (_) {} enc = null; } if (encCtx) { encCtx.close(); encCtx = null; } }
+
+// 下行:Opus 帧 → PCM → 顺序排程播放(24k)
+function ensurePlay() { if (!playCtx) { playCtx = new AudioContext(); cursor = playCtx.currentTime; } if (playCtx.state === 'suspended') playCtx.resume(); }
+function playOpus(bytes) {
+  ensurePlay();
+  if (!dec) { decTs = 0; dec = new AudioDecoder({ output: a => { const f = new Float32Array(a.numberOfFrames); a.copyTo(f, { planeIndex: 0, format: 'f32-planar' }); schedule(f, a.sampleRate); a.close(); }, error: e => log('err', 'dec ' + e) }); dec.configure({ codec: 'opus', sampleRate: DOWN, numberOfChannels: 1 }); }
+  try { dec.decode(new EncodedAudioChunk({ type: 'key', timestamp: decTs, data: bytes })); decTs += 20000; } catch (e) { log('err', 'dec ' + e); }
+}
+function schedule(f, rate) { const b = playCtx.createBuffer(1, f.length, rate); b.copyToChannel(f, 0); const s = playCtx.createBufferSource(); s.buffer = b; s.connect(playCtx.destination); if (cursor < playCtx.currentTime) cursor = playCtx.currentTime; s.start(cursor); cursor += b.duration; playing.push(s); s.onended = () => playing = playing.filter(x => x !== s); }
+function isPlaying() { return playCtx && cursor > playCtx.currentTime; }
+function stopPlay() { playing.forEach(s => { try { s.stop(); } catch (_) {} }); playing = []; if (playCtx) cursor = playCtx.currentTime; }
+
+// ===== ④ 状态上报:常驻连接周期上报设备快照。extra 解析成对象塞进 extra(键值都用字符串,后端是 map[string]string)。 =====
+let stTimer = null;
+function sendStatus() {
+  if (!(ws && ws.readyState === 1)) { $('oSt').textContent = '❌ 未连接'; return; }
+  let extra = undefined;
+  const raw = $('st_extra').value.trim();
+  if (raw) { try { extra = JSON.parse(raw); } catch (e) { $('oSt').textContent = '❌ extra 不是合法 JSON:' + e; log('err', 'status extra ' + e); return; } }
+  const data = {
+    wifiSsid: $('st_ssid').value.trim(),
+    wifiPassword: $('st_pwd').value.trim(),
+    firmwareVersion: $('fw_ver').value.trim(),
+    batteryLevel: Number($('st_bat').value),
+    powerSource: Number($('st_pow').value),
+    latitude: Number($('st_lat').value),
+    longitude: Number($('st_lng').value),
+    deviceModelCode: $('model').value.trim(),                  // 设备自报硬件型号(用于 OTA 归属;留空则不回填)
+  };
+  if (extra !== undefined) data.extra = extra;
+  send('status', data);                                        // 照样进协议原始日志
+  $('oSt').textContent = '已发送 status @ ' + new Date().toLocaleTimeString() + (stTimer ? '(自动周期上报中)' : '');
+}
+$('bSt').onclick = sendStatus;
+function startAutoStatus() {
+  stopAutoStatus();
+  const sec = Math.max(1, Number($('st_int').value) || 10);
+  stTimer = setInterval(sendStatus, sec * 1000);
+  log('sys', '开启自动状态上报:每 ' + sec + 's'); sendStatus();   // 立即先发一帧
+}
+function stopAutoStatus() { if (stTimer) { clearInterval(stTimer); stTimer = null; if ($('st_auto').checked) $('st_auto').checked = false; } }
+$('st_auto').onchange = () => $('st_auto').checked ? startAutoStatus() : stopAutoStatus();
+
+// ===== ⑤ 检测更新:发 checkUpdate 带当前 version,服务端按型号查当前发布版回 update 帧(不同才 hasUpdate)。 =====
+$('bCu').onclick = () => {
+  if (!(ws && ws.readyState === 1)) { $('oCu').textContent = '❌ 未连接'; return; }
+  const v = $('fw_ver').value.trim();
+  send('checkUpdate', { version: v });
+  $('oCu').textContent = '已发送 checkUpdate(version=' + v + '),等待 update 帧…';
+};
+function showUpdate(d) {
+  $('oCu').textContent = d.hasUpdate
+    ? '✅ 目标版本 ' + (d.version || '?')
+      + (d.forceUpdate ? ' [强制]' : '')
+      + '\npackageUrl  ' + (d.packageUrl || '?')
+      + '\npackageSize ' + (d.packageSize ?? '?') + '  hash ' + (d.packageHash || '?')
+    : '已是当前发布版(hasUpdate=false,设备不动)';
+}
+</script>
+</body>
+</html>

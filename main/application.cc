@@ -9,6 +9,7 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "alarm_manager.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -396,6 +397,13 @@ void Application::CheckAssetsVersion() {
 }
 
 void Application::CheckNewVersion() {
+    Settings websocket_settings("websocket", false);
+    if (!websocket_settings.GetString("bootstrap_url", CONFIG_DEVICE_BOOTSTRAP_URL).empty()) {
+        ESP_LOGI(TAG, "Self-hosted Bootstrap is configured, skipping legacy HTTP OTA check");
+        ota_->MarkCurrentVersionValid();
+        return;
+    }
+
     const int MAX_RETRY = 10;
     int retry_count = 0;
     int retry_delay = 10; // Initial retry delay in seconds
@@ -477,7 +485,12 @@ void Application::InitializeProtocol() {
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
-    if (ota_->HasMqttConfig()) {
+    Settings websocket_settings("websocket", false);
+    bool has_self_hosted_bootstrap = !websocket_settings.GetString("bootstrap_url", CONFIG_DEVICE_BOOTSTRAP_URL).empty();
+
+    if (has_self_hosted_bootstrap) {
+        protocol_ = std::make_unique<WebsocketProtocol>();
+    } else if (ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig()) {
         protocol_ = std::make_unique<WebsocketProtocol>();
@@ -496,8 +509,19 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
+        if (aborted_) {
+            return;
+        }
+        if (!tts_audio_active_) {
+            tts_audio_active_ = true;
+            Schedule([this]() {
+                if (!aborted_ && GetDeviceState() != kDeviceStateSpeaking) {
+                    SetDeviceState(kDeviceStateSpeaking);
+                }
+            });
+        }
+        if (!audio_service_.PushPacketToDecodeQueue(std::move(packet), false)) {
+            ESP_LOGW(TAG, "Failed to queue incoming audio packet");
         }
     });
     
@@ -511,6 +535,10 @@ void Application::InitializeProtocol() {
     
     protocol_->OnAudioChannelClosed([this, &board]() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        aborted_ = true;
+        tts_audio_active_ = false;
+        tts_stop_received_ = false;
+        audio_service_.ResetDecoder();
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
@@ -521,14 +549,30 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
+        auto data = cJSON_GetObjectItem(root, "data");
+        const cJSON* body = cJSON_IsObject(data) ? data : root;
+        if (!cJSON_IsString(type)) {
+            ESP_LOGW(TAG, "Incoming message missing type");
+            return;
+        }
         if (strcmp(type->valuestring, "tts") == 0) {
-            auto state = cJSON_GetObjectItem(root, "state");
+            auto state = cJSON_GetObjectItem(body, "state");
+            if (!cJSON_IsString(state)) {
+                ESP_LOGW(TAG, "TTS message missing state");
+                return;
+            }
             if (strcmp(state->valuestring, "start") == 0) {
+                audio_service_.ResetDecoder();
+                aborted_ = false;
+                tts_audio_active_ = true;
+                tts_stop_received_ = false;
                 Schedule([this]() {
                     aborted_ = false;
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
+                tts_audio_active_ = false;
+                tts_stop_received_ = true;
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
@@ -538,8 +582,8 @@ void Application::InitializeProtocol() {
                         }
                     }
                 });
-            } else if (strcmp(state->valuestring, "sentence_start") == 0) {
-                auto text = cJSON_GetObjectItem(root, "text");
+            } else if (strcmp(state->valuestring, "sentence_start") == 0 || strcmp(state->valuestring, "sentence") == 0) {
+                auto text = cJSON_GetObjectItem(body, "text");
                 if (cJSON_IsString(text)) {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
                     Schedule([display, message = std::string(text->valuestring)]() {
@@ -548,7 +592,18 @@ void Application::InitializeProtocol() {
                 }
             }
         } else if (strcmp(type->valuestring, "stt") == 0) {
-            auto text = cJSON_GetObjectItem(root, "text");
+            if (tts_audio_active_ || GetDeviceState() == kDeviceStateSpeaking) {
+                aborted_ = true;
+                tts_audio_active_ = false;
+                tts_stop_received_ = false;
+                audio_service_.ResetDecoder();
+                Schedule([this]() {
+                    if (GetDeviceState() == kDeviceStateSpeaking) {
+                        SetDeviceState(kDeviceStateListening);
+                    }
+                });
+            }
+            auto text = cJSON_GetObjectItem(body, "text");
             if (cJSON_IsString(text)) {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
                 Schedule([display, message = std::string(text->valuestring)]() {
@@ -556,19 +611,19 @@ void Application::InitializeProtocol() {
                 });
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
-            auto emotion = cJSON_GetObjectItem(root, "emotion");
+            auto emotion = cJSON_GetObjectItem(body, "emotion");
             if (cJSON_IsString(emotion)) {
                 Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
                     display->SetEmotion(emotion_str.c_str());
                 });
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
-            auto payload = cJSON_GetObjectItem(root, "payload");
+            auto payload = cJSON_GetObjectItem(body, "payload");
             if (cJSON_IsObject(payload)) {
                 McpServer::GetInstance().ParseMessage(payload);
             }
         } else if (strcmp(type->valuestring, "system") == 0) {
-            auto command = cJSON_GetObjectItem(root, "command");
+            auto command = cJSON_GetObjectItem(body, "command");
             if (cJSON_IsString(command)) {
                 ESP_LOGI(TAG, "System command: %s", command->valuestring);
                 if (strcmp(command->valuestring, "reboot") == 0) {
@@ -581,17 +636,32 @@ void Application::InitializeProtocol() {
                 }
             }
         } else if (strcmp(type->valuestring, "alert") == 0) {
-            auto status = cJSON_GetObjectItem(root, "status");
-            auto message = cJSON_GetObjectItem(root, "message");
-            auto emotion = cJSON_GetObjectItem(root, "emotion");
+            auto status = cJSON_GetObjectItem(body, "status");
+            auto message = cJSON_GetObjectItem(body, "message");
+            auto emotion = cJSON_GetObjectItem(body, "emotion");
             if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
                 Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::OGG_VIBRATION);
             } else {
                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
             }
+        } else if (strcmp(type->valuestring, "update") == 0) {
+            auto has_update = cJSON_GetObjectItem(body, "hasUpdate");
+            if (cJSON_IsBool(has_update) && cJSON_IsTrue(has_update)) {
+                auto url = cJSON_GetObjectItem(body, "packageUrl");
+                auto version = cJSON_GetObjectItem(body, "version");
+                if (cJSON_IsString(url)) {
+                    std::string package_url = url->valuestring;
+                    std::string package_version = cJSON_IsString(version) ? version->valuestring : "";
+                    Schedule([this, package_url, package_version]() {
+                        UpgradeFirmware(package_url, package_version);
+                    });
+                } else {
+                    ESP_LOGW(TAG, "Update message missing packageUrl");
+                }
+            }
 #if CONFIG_RECEIVE_CUSTOM_MESSAGE
         } else if (strcmp(type->valuestring, "custom") == 0) {
-            auto payload = cJSON_GetObjectItem(root, "payload");
+            auto payload = cJSON_GetObjectItem(body, "payload");
             ESP_LOGI(TAG, "Received custom message: %s", cJSON_PrintUnformatted(root));
             if (cJSON_IsObject(payload)) {
                 Schedule([this, display, payload_str = std::string(cJSON_PrintUnformatted(payload))]() {
@@ -601,6 +671,8 @@ void Application::InitializeProtocol() {
                 ESP_LOGW(TAG, "Invalid custom message format: missing payload");
             }
 #endif
+        } else if (strcmp(type->valuestring, "pairingCode") == 0 || strcmp(type->valuestring, "bound") == 0) {
+            // Handled by WebsocketProtocol so OpenAudioChannel can keep waiting for hello.
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
@@ -880,7 +952,7 @@ void Application::HandleStateChangedEvent() {
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
                 // For auto mode, wait for playback queue to be empty before enabling voice processing
                 // This prevents audio truncation when STOP arrives late due to network jitter
-                if (listening_mode_ == kListeningModeAutoStop) {
+                if (listening_mode_ == kListeningModeAutoStop && !AlarmManager::GetInstance().HasRingingAlarms()) {
                     audio_service_.WaitForPlaybackQueueEmpty();
                 }
                 
@@ -911,7 +983,6 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
-            audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableVoiceProcessing(false);
@@ -934,6 +1005,9 @@ void Application::Schedule(std::function<void()>&& callback) {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
+    tts_audio_active_ = false;
+    tts_stop_received_ = false;
+    audio_service_.ResetDecoder();
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }

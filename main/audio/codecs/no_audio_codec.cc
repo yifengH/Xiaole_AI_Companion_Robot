@@ -1,6 +1,8 @@
 #include "no_audio_codec.h"
 
 #include <esp_log.h>
+#include <esp_timer.h>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -36,9 +38,9 @@ NoAudioCodecDuplex::NoAudioCodecDuplex(int input_sample_rate, int output_sample_
             .sample_rate_hz = (uint32_t)output_sample_rate_,
             .clk_src = I2S_CLK_SRC_DEFAULT,
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
-			#ifdef   I2S_HW_VERSION_2
-				.ext_clk_freq_hz = 0,
-			#endif
+		#ifdef   I2S_HW_VERSION_2
+			.ext_clk_freq_hz = 0,
+		#endif
 
         },
         .slot_cfg = {
@@ -79,6 +81,12 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
     duplex_ = false;
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
+    input_reference_ = true;
+    input_channels_ = input_reference_ ? 2 : 1;
+
+    time_us_write_ = 0;
+    time_us_read_ = 0;
+    slice_index_ = 0;
 
     // Create a new channel for speaker
     i2s_chan_config_t chan_cfg = {
@@ -97,9 +105,9 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
             .sample_rate_hz = (uint32_t)output_sample_rate_,
             .clk_src = I2S_CLK_SRC_DEFAULT,
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
-			#ifdef   I2S_HW_VERSION_2
-				.ext_clk_freq_hz = 0,
-			#endif
+		#ifdef   I2S_HW_VERSION_2
+			.ext_clk_freq_hz = 0,
+		#endif
 
         },
         .slot_cfg = {
@@ -148,6 +156,12 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
     duplex_ = false;
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
+    input_reference_ = true;
+    input_channels_ = input_reference_ ? 2 : 1;
+
+    time_us_write_ = 0;
+    time_us_read_ = 0;
+    slice_index_ = 0;
 
     // Create a new channel for speaker
     i2s_chan_config_t chan_cfg = {
@@ -166,9 +180,9 @@ NoAudioCodecSimplex::NoAudioCodecSimplex(int input_sample_rate, int output_sampl
             .sample_rate_hz = (uint32_t)output_sample_rate_,
             .clk_src = I2S_CLK_SRC_DEFAULT,
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
-			#ifdef   I2S_HW_VERSION_2
-				.ext_clk_freq_hz = 0,
-			#endif
+		#ifdef   I2S_HW_VERSION_2
+			.ext_clk_freq_hz = 0,
+		#endif
 
         },
         .slot_cfg = {
@@ -221,15 +235,36 @@ int NoAudioCodec::Write(const int16_t* data, int samples) {
     // output_volume_: 0-100
     // volume_factor_: 0-65536
     int32_t volume_factor = pow(double(output_volume_) / 100.0, 2) * 65536;
-    for (int i = 0; i < samples; i++) {
-        int64_t temp = int64_t(data[i]) * volume_factor; // 使用 int64_t 进行乘法运算
-        if (temp > INT32_MAX) {
-            buffer[i] = INT32_MAX;
-        } else if (temp < INT32_MIN) {
-            buffer[i] = INT32_MIN;
-        } else {
-            buffer[i] = static_cast<int32_t>(temp);
+    {
+        std::lock_guard<std::mutex> ref_lock(ref_mutex_);
+        const int32_t play_size = 512;
+        if (input_reference_) {
+            if (output_buffer_.size() < static_cast<size_t>(play_size * 10)) {
+                output_buffer_.resize(play_size * 10, 0);
+                slice_index_ = 0;
+            }
         }
+
+        for (int i = 0; i < samples; i++) {
+            int64_t temp = int64_t(data[i]) * volume_factor; // 使用 int64_t 进行乘法运算
+            if (temp > INT32_MAX) {
+                buffer[i] = INT32_MAX;
+            } else if (temp < INT32_MIN) {
+                buffer[i] = INT32_MIN;
+            } else {
+                buffer[i] = static_cast<int32_t>(temp);
+            }
+
+            if (input_reference_ && !output_buffer_.empty()) {
+                output_buffer_[slice_index_] = data[i];
+                slice_index_++;
+                if (slice_index_ >= play_size * 10) {
+                    slice_index_ = 0;
+                }
+            }
+        }
+
+        time_us_write_ = esp_timer_get_time();
     }
 
     size_t bytes_written;
@@ -238,20 +273,80 @@ int NoAudioCodec::Write(const int16_t* data, int samples) {
 }
 
 int NoAudioCodec::Read(int16_t* dest, int samples) {
-    size_t bytes_read;
-    constexpr TickType_t kReadTimeoutTicks = pdMS_TO_TICKS(200);
+    if (!input_reference_) {
+        size_t bytes_read;
 
-    std::vector<int32_t> bit32_buffer(samples);
-    if (i2s_channel_read(rx_handle_, bit32_buffer.data(), samples * sizeof(int32_t), &bytes_read, kReadTimeoutTicks) != ESP_OK) {
+        std::vector<int32_t> bit32_buffer(samples);
+        if (i2s_channel_read(rx_handle_, bit32_buffer.data(), samples * sizeof(int32_t), &bytes_read, portMAX_DELAY) != ESP_OK) {
+            ESP_LOGE(TAG, "Read Failed!");
+            return 0;
+        }
+
+        samples = bytes_read / sizeof(int32_t);
+        for (int i = 0; i < samples; i++) {
+            int32_t value = bit32_buffer[i] >> 12;
+            dest[i] = (value > INT16_MAX) ? INT16_MAX : (value < -INT16_MAX) ? -INT16_MAX : (int16_t)value;
+        }
+        return samples;
+    }
+
+    static float ref_index = 0.0f;
+    static bool first_speak = true;
+    const int32_t play_size = 512;
+    float sample_rate_ratio = (float)output_sample_rate_ / (float)input_sample_rate_;
+
+    {
+        std::lock_guard<std::mutex> ref_lock(ref_mutex_);
+        time_us_read_ = esp_timer_get_time();
+        if (time_us_read_ - time_us_write_ > 1000 * 100) {
+            std::fill(output_buffer_.begin(), output_buffer_.end(), 0);
+            first_speak = true;
+            slice_index_ = 0;
+            ref_index = play_size * 10 - 512;
+        } else if (first_speak) {
+            first_speak = false;
+            ref_index = 0.0f;
+        }
+
+        if (ref_index < 0) {
+            ref_index = play_size * 10 + ref_index;
+        }
+    }
+
+    size_t bytes_read;
+    int mic_samples = samples / 2;
+    std::vector<int32_t> bit32_buffer(mic_samples);
+    if (i2s_channel_read(rx_handle_, bit32_buffer.data(), mic_samples * sizeof(int32_t), &bytes_read, portMAX_DELAY) != ESP_OK) {
+        ESP_LOGE(TAG, "Read Failed!");
         return 0;
     }
 
-    samples = bytes_read / sizeof(int32_t);
-    for (int i = 0; i < samples; i++) {
-        int32_t value = bit32_buffer[i] >> 12;
-        dest[i] = (value > INT16_MAX) ? INT16_MAX : (value < -INT16_MAX) ? -INT16_MAX : (int16_t)value;
+    mic_samples = bytes_read / sizeof(int32_t);
+    {
+        std::lock_guard<std::mutex> ref_lock(ref_mutex_);
+        for (int i = 0; i < mic_samples; i++) {
+#if CONFIG_USE_REALTIME_CHAT
+            int32_t value = bit32_buffer[i] >> 8;
+            int64_t temp = int64_t(value) / 256;
+            dest[i * 2] = (temp > INT16_MAX) ? INT16_MAX : (temp < -INT16_MAX) ? -INT16_MAX : (int16_t)temp;
+#else
+            int32_t value = bit32_buffer[i] >> 12;
+            dest[i * 2] = (value > INT16_MAX) ? INT16_MAX : (value < -INT16_MAX) ? -INT16_MAX : (int16_t)value;
+#endif
+            int32_t ref_idx = (int32_t)ref_index;
+            if (output_buffer_.size() > static_cast<size_t>(ref_idx)) {
+                dest[i * 2 + 1] = output_buffer_[ref_idx];
+            } else {
+                dest[i * 2 + 1] = 0;
+            }
+
+            ref_index += sample_rate_ratio;
+            if (ref_index >= play_size * 10) {
+                ref_index = ref_index - play_size * 10;
+            }
+        }
     }
-    return samples;
+    return mic_samples * 2;
 }
 
 void NoAudioCodec::EnableInput(bool enable) {
@@ -290,6 +385,12 @@ NoAudioCodecSimplexPdm::NoAudioCodecSimplexPdm(int input_sample_rate, int output
     duplex_ = false;
     input_sample_rate_ = input_sample_rate;
     output_sample_rate_ = output_sample_rate;
+    input_reference_ = true;
+    input_channels_ = input_reference_ ? 2 : 1;
+
+    time_us_write_ = 0;
+    time_us_read_ = 0;
+    slice_index_ = 0;
 
     // Create a new channel for speaker
     i2s_chan_config_t tx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG((i2s_port_t)1, I2S_ROLE_MASTER);
@@ -306,9 +407,9 @@ NoAudioCodecSimplexPdm::NoAudioCodecSimplexPdm(int input_sample_rate, int output
             .sample_rate_hz = (uint32_t)output_sample_rate_,
             .clk_src = I2S_CLK_SRC_DEFAULT,
             .mclk_multiple = I2S_MCLK_MULTIPLE_256,
-			#ifdef   I2S_HW_VERSION_2
-				.ext_clk_freq_hz = 0,
-			#endif
+		#ifdef   I2S_HW_VERSION_2
+			.ext_clk_freq_hz = 0,
+		#endif
 
         },
         .slot_cfg = {
@@ -367,19 +468,80 @@ NoAudioCodecSimplexPdm::NoAudioCodecSimplexPdm(int input_sample_rate, int output
 int NoAudioCodecSimplexPdm::Read(int16_t* dest, int samples) {
     size_t bytes_read;
 
-    // PDM 解调后的数据位宽为 16 位，直接读取到目标缓冲区
-    if (i2s_channel_read(rx_handle_, dest, samples * sizeof(int16_t), &bytes_read, portMAX_DELAY) != ESP_OK) {
+    if (!input_reference_) {
+        // PDM 解调后的数据位宽为 16 位，直接读取到目标缓冲区
+        if (i2s_channel_read(rx_handle_, dest, samples * sizeof(int16_t), &bytes_read, portMAX_DELAY) != ESP_OK) {
+            ESP_LOGE(TAG, "Read Failed!");
+            return 0;
+        }
+
+        samples = bytes_read / sizeof(int16_t);
+        if (input_gain_ > 0) {
+            int gain_factor = (int)input_gain_;
+            for (int i = 0; i < samples; i++) {
+                int32_t amplified = dest[i] * gain_factor;
+                dest[i] = (amplified > INT16_MAX) ? INT16_MAX : (amplified < -INT16_MAX) ? -INT16_MAX : (int16_t)amplified;
+            }
+        }
+        return samples;
+    }
+
+    static float ref_index = 0.0f;
+    static bool first_speak = true;
+    const int32_t play_size = 512;
+    float sample_rate_ratio = (float)output_sample_rate_ / (float)input_sample_rate_;
+
+    {
+        std::lock_guard<std::mutex> ref_lock(ref_mutex_);
+        time_us_read_ = esp_timer_get_time();
+        if (time_us_read_ - time_us_write_ > 1000 * 100) {
+            std::fill(output_buffer_.begin(), output_buffer_.end(), 0);
+            first_speak = true;
+            slice_index_ = 0;
+            ref_index = play_size * 10 - 512;
+        } else if (first_speak) {
+            first_speak = false;
+            ref_index = 0.0f;
+        }
+
+        if (ref_index < 0) {
+            ref_index = play_size * 10 + ref_index;
+        }
+    }
+
+    int mic_samples = samples / 2;
+    std::vector<int16_t> mic_buffer(mic_samples);
+    if (i2s_channel_read(rx_handle_, mic_buffer.data(), mic_samples * sizeof(int16_t), &bytes_read, portMAX_DELAY) != ESP_OK) {
         ESP_LOGE(TAG, "Read Failed!");
         return 0;
     }
 
-    samples = bytes_read / sizeof(int16_t);
+    mic_samples = bytes_read / sizeof(int16_t);
     if (input_gain_ > 0) {
         int gain_factor = (int)input_gain_;
-        for (int i = 0; i < samples; i++) {
-            int32_t amplified = dest[i] * gain_factor;
-            dest[i] = (amplified > INT16_MAX) ? INT16_MAX : (amplified < -INT16_MAX) ? -INT16_MAX : (int16_t)amplified;
+        for (int i = 0; i < mic_samples; i++) {
+            int32_t amplified = mic_buffer[i] * gain_factor;
+            mic_buffer[i] = (amplified > INT16_MAX) ? INT16_MAX : (amplified < -INT16_MAX) ? -INT16_MAX : (int16_t)amplified;
         }
     }
-    return samples;
+
+    {
+        std::lock_guard<std::mutex> ref_lock(ref_mutex_);
+        for (int i = 0; i < mic_samples; i++) {
+            dest[i * 2] = mic_buffer[i];
+            int32_t ref_idx = (int32_t)ref_index;
+            if (output_buffer_.size() > static_cast<size_t>(ref_idx)) {
+                dest[i * 2 + 1] = output_buffer_[ref_idx];
+            } else {
+                dest[i * 2 + 1] = 0;
+            }
+
+            ref_index += sample_rate_ratio;
+            if (ref_index >= play_size * 10) {
+                ref_index = ref_index - play_size * 10;
+            }
+        }
+    }
+
+    return mic_samples * 2;
 }
