@@ -10,7 +10,6 @@
 #include <cJSON.h>
 #include <esp_log.h>
 #include <esp_app_desc.h>
-#include <arpa/inet.h>
 #include "assets/lang_config.h"
 
 #define TAG "WS"
@@ -78,36 +77,12 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     if (websocket_ == nullptr || !websocket_->IsConnected()) {
         return false;
     }
-
-    if (version_ == 2) {
-        std::string serialized;
-        serialized.resize(sizeof(BinaryProtocol2) + packet->payload.size());
-        auto bp2 = (BinaryProtocol2*)serialized.data();
-        bp2->version = htons(version_);
-        bp2->type = 0;
-        bp2->reserved = 0;
-        bp2->timestamp = htonl(packet->timestamp);
-        bp2->payload_size = htonl(packet->payload.size());
-        memcpy(bp2->payload, packet->payload.data(), packet->payload.size());
-
-        return websocket_->Send(serialized.data(), serialized.size(), true);
-    } else if (version_ == 3) {
-        std::string serialized;
-        serialized.resize(sizeof(BinaryProtocol3) + packet->payload.size());
-        auto bp3 = (BinaryProtocol3*)serialized.data();
-        bp3->type = 0;
-        bp3->reserved = 0;
-        bp3->payload_size = htons(packet->payload.size());
-        memcpy(bp3->payload, packet->payload.data(), packet->payload.size());
-
-        return websocket_->Send(serialized.data(), serialized.size(), true);
-    } else {
-        std::string serialized;
-        serialized.resize(1 + packet->payload.size());
-        serialized[0] = 0x01;
-        memcpy(serialized.data() + 1, packet->payload.data(), packet->payload.size());
-        return websocket_->Send(serialized.data(), serialized.size(), true);
-    }
+    // 契约二进制帧:首字节 0x01 = Opus 音频,其后是裸 Opus 包(无版本号/时间戳/长度头)。
+    std::string serialized;
+    serialized.resize(1 + packet->payload.size());
+    serialized[0] = 0x01;
+    memcpy(serialized.data() + 1, packet->payload.data(), packet->payload.size());
+    return websocket_->Send(serialized.data(), serialized.size(), true);
 }
 
 bool WebsocketProtocol::SendText(const std::string& text) {
@@ -134,23 +109,14 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
-    Settings settings("websocket", false);
-    std::string url = settings.GetString("url");
-    std::string token = settings.GetString("token");
-    int version = settings.GetInt("version");
-    if (version != 0) {
-        version_ = version;
-    }
-
     error_occurred_ = false;
     saw_pairing_code_ = false;
     xEventGroupClearBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
 
-    if (ShouldUseBootstrap()) {
-        if (!Bootstrap(url)) {
-            return false;
-        }
-        token.clear();
+    // 每次连接前都先 Bootstrap 换取新短时令牌 + 下发的 WSS 地址(契约:开机/重连第一件事)。
+    std::string url;
+    if (!Bootstrap(url)) {
+        return false;
     }
 
     auto network = Board::GetInstance().GetNetwork();
@@ -159,71 +125,22 @@ bool WebsocketProtocol::OpenAudioChannel() {
         ESP_LOGE(TAG, "Failed to create websocket");
         return false;
     }
-
-    if (!token.empty()) {
-        // If token not has a space, add "Bearer " prefix
-        if (token.find(" ") == std::string::npos) {
-            token = "Bearer " + token;
-        }
-        websocket_->SetHeader("Authorization", token.c_str());
-    }
-    websocket_->SetHeader("Protocol-Version", std::to_string(version_).c_str());
-    websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
-    websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    // 鉴权只有一种:令牌已由 Bootstrap 拼进 url 的 ?token=。不发任何额外 HTTP 头。
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
         if (binary) {
-            if (on_incoming_audio_ != nullptr) {
-                if (version_ == 2) {
-                    if (len < sizeof(BinaryProtocol2)) {
-                        ESP_LOGW(TAG, "Binary protocol v2 packet too short: %u", (unsigned)len);
-                        return;
-                    }
-                    const auto* bp2 = reinterpret_cast<const BinaryProtocol2*>(data);
-                    const uint32_t timestamp = ntohl(bp2->timestamp);
-                    const uint32_t payload_size = ntohl(bp2->payload_size);
-                    if (len < sizeof(BinaryProtocol2) + payload_size) {
-                        ESP_LOGW(TAG, "Binary protocol v2 payload truncated: len=%u payload=%u", (unsigned)len, (unsigned)payload_size);
-                        return;
-                    }
-                    const auto* payload = reinterpret_cast<const uint8_t*>(bp2->payload);
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = timestamp,
-                        .payload = std::vector<uint8_t>(payload, payload + payload_size)
-                    }));
-                } else if (version_ == 3) {
-                    if (len < sizeof(BinaryProtocol3)) {
-                        ESP_LOGW(TAG, "Binary protocol v3 packet too short: %u", (unsigned)len);
-                        return;
-                    }
-                    const auto* bp3 = reinterpret_cast<const BinaryProtocol3*>(data);
-                    const uint16_t payload_size = ntohs(bp3->payload_size);
-                    if (len < sizeof(BinaryProtocol3) + payload_size) {
-                        ESP_LOGW(TAG, "Binary protocol v3 payload truncated: len=%u payload=%u", (unsigned)len, (unsigned)payload_size);
-                        return;
-                    }
-                    const auto* payload = reinterpret_cast<const uint8_t*>(bp3->payload);
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = 0,
-                        .payload = std::vector<uint8_t>(payload, payload + payload_size)
-                    }));
-                } else {
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
-                        .sample_rate = server_sample_rate_,
-                        .frame_duration = server_frame_duration_,
-                        .timestamp = 0,
-                        .payload = len > 0 && static_cast<uint8_t>(data[0]) == 0x01
-                            ? std::vector<uint8_t>((uint8_t*)data + 1, (uint8_t*)data + len)
-                            : std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
-                    }));
-                }
+            // 契约二进制帧:首字节是类型。0x01 = 下行 Opus 音频,其后为裸 Opus 包。
+            if (on_incoming_audio_ != nullptr && len > 1 && static_cast<uint8_t>(data[0]) == 0x01) {
+                on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                    .sample_rate = server_sample_rate_,
+                    .frame_duration = server_frame_duration_,
+                    .timestamp = 0,
+                    .payload = std::vector<uint8_t>((uint8_t*)data + 1, (uint8_t*)data + len)
+                }));
             }
         } else {
-            // Parse JSON data
+            // 文本帧:统一信封 {type, data}。hello/pairingCode/bound 在此就地处理(让 OpenAudioChannel 的
+            // 等 hello 循环能感知配对态),其余转交 application 的 OnIncomingJson。
             auto root = cJSON_ParseWithLength(data, len);
             if (root == nullptr) {
                 ESP_LOGW(TAG, "Invalid JSON frame: %s", std::string(data, len).c_str());
@@ -240,9 +157,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
                     auto ttl = cJSON_GetObjectItem(data_obj, "ttlSeconds");
                     std::string message = "Pairing code: ";
                     message += cJSON_IsString(code) ? code->valuestring : "(unknown)";
-                    if (cJSON_IsNumber(ttl)) {
+                    // ttlSeconds 是 int64,protojson 编码为 JSON 字符串。
+                    if (cJSON_IsString(ttl)) {
                         message += " / ";
-                        message += std::to_string(ttl->valueint);
+                        message += ttl->valuestring;
                         message += "s";
                     }
                     Board::GetInstance().GetDisplay()->SetChatMessage("system", message.c_str());
@@ -274,20 +192,19 @@ bool WebsocketProtocol::OpenAudioChannel() {
         }
     });
 
-    ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
+    ESP_LOGI(TAG, "Connecting to websocket server: %s", url.c_str());
     if (!websocket_->Connect(url.c_str())) {
+        // 注:底层 WebSocket 组件未透出握手 HTTP 状态码(401/403/503),无法在此细分处理。
+        // 因每次连接前都重新 Bootstrap,令牌恒为新,401(令牌过期)已基本规避;403(未注册/封禁)/503
+        // 表现为连接失败,由上层退避重连兜底。如需按状态码区分,须先让该组件透出 GetStatusCode()。
         ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
 
-    if (!ShouldUseBootstrap() && !SendText(GetHelloMessage())) {
-        return false;
-    }
+    // 连上后:上报一次状态(供后台在线/型号归属)+ 检测固件更新。设备 hello 可选,不发。
     SendText(GetStatusMessage());
-    if (ShouldUseBootstrap()) {
-        SendText(GetCheckUpdateMessage());
-    }
+    SendText(GetCheckUpdateMessage());
 
     // Wait for server hello
     bool hello_received = false;
@@ -319,83 +236,28 @@ bool WebsocketProtocol::OpenAudioChannel() {
     return true;
 }
 
-std::string WebsocketProtocol::GetHelloMessage() {
-    // keys: message type, version, audio_params (format, sample_rate, channels)
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "type", "hello");
-    cJSON_AddNumberToObject(root, "version", version_);
-    cJSON* features = cJSON_CreateObject();
-#if CONFIG_USE_SERVER_AEC
-    cJSON_AddBoolToObject(features, "aec", true);
-#endif
-    cJSON_AddBoolToObject(features, "mcp", true);
-    cJSON_AddItemToObject(root, "features", features);
-    cJSON_AddStringToObject(root, "transport", "websocket");
-    cJSON* audio_params = cJSON_CreateObject();
-    cJSON_AddStringToObject(audio_params, "format", "opus");
-    cJSON_AddNumberToObject(audio_params, "sample_rate", 16000);
-    cJSON_AddNumberToObject(audio_params, "channels", 1);
-    cJSON_AddNumberToObject(audio_params, "frame_duration", OPUS_FRAME_DURATION_MS);
-    cJSON_AddItemToObject(root, "audio_params", audio_params);
-    auto json_str = cJSON_PrintUnformatted(root);
-    std::string message(json_str);
-    cJSON_free(json_str);
-    cJSON_Delete(root);
-    return message;
-}
-
 void WebsocketProtocol::ParseServerHello(const cJSON* root) {
+    // 契约 hello.data:{ sessionId, audio:{ format, sampleRate } }(字段名一律 lowerCamelCase)。
     auto data_obj = MessageDataOrRoot(root);
-    auto transport = cJSON_GetObjectItem(data_obj, "transport");
-    if (cJSON_IsString(transport) && strcmp(transport->valuestring, "websocket") != 0) {
-        ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
-        return;
-    }
 
     auto session_id = cJSON_GetObjectItem(data_obj, "sessionId");
-    if (!cJSON_IsString(session_id)) {
-        session_id = cJSON_GetObjectItem(data_obj, "session_id");
-    }
     if (cJSON_IsString(session_id)) {
         session_id_ = session_id->valuestring;
         ESP_LOGI(TAG, "Session ID: %s", session_id_.c_str());
     }
 
-    auto audio_params = cJSON_GetObjectItem(data_obj, "audio_params");
-    if (!cJSON_IsObject(audio_params)) {
-        audio_params = cJSON_GetObjectItem(data_obj, "audio");
-    }
-    if (cJSON_IsObject(audio_params)) {
-        auto sample_rate = cJSON_GetObjectItem(audio_params, "sample_rate");
-        if (!cJSON_IsNumber(sample_rate)) {
-            sample_rate = cJSON_GetObjectItem(audio_params, "sampleRate");
-        }
+    auto audio = cJSON_GetObjectItem(data_obj, "audio");
+    if (cJSON_IsObject(audio)) {
+        auto sample_rate = cJSON_GetObjectItem(audio, "sampleRate");
         if (cJSON_IsNumber(sample_rate)) {
             server_sample_rate_ = sample_rate->valueint;
         }
-        auto frame_duration = cJSON_GetObjectItem(audio_params, "frame_duration");
-        if (!cJSON_IsNumber(frame_duration)) {
-            frame_duration = cJSON_GetObjectItem(audio_params, "frameDuration");
-        }
-        if (cJSON_IsNumber(frame_duration)) {
-            server_frame_duration_ = frame_duration->valueint;
-        }
     }
 
-    if (server_frame_duration_ <= 0) {
-        server_frame_duration_ = 20;
-        ESP_LOGW(TAG, "Server hello missing valid frame_duration, fallback to %d ms", server_frame_duration_);
-    }
-
-    ESP_LOGI(TAG, "Server audio params: sample_rate=%d, frame_duration=%d",
+    ESP_LOGI(TAG, "Server audio: sampleRate=%d, frameDuration=%d",
         server_sample_rate_, server_frame_duration_);
 
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
-}
-
-bool WebsocketProtocol::ShouldUseBootstrap() const {
-    Settings settings("websocket", false);
-    return !settings.GetString("bootstrap_url", CONFIG_DEVICE_BOOTSTRAP_URL).empty();
 }
 
 bool WebsocketProtocol::Bootstrap(std::string& websocket_url) {
@@ -497,50 +359,28 @@ std::string WebsocketProtocol::GetCheckUpdateMessage() {
     return JsonToString(root);
 }
 
-void WebsocketProtocol::SendWakeWordDetected(const std::string& wake_word) {
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "type", "listen");
-    cJSON* data = cJSON_CreateObject();
-    cJSON_AddStringToObject(data, "state", "detect");
-    cJSON_AddStringToObject(data, "text", wake_word.c_str());
-    cJSON_AddItemToObject(root, "data", data);
-    SendText(JsonToString(root));
-}
-
 void WebsocketProtocol::SendStartListening(ListeningMode mode) {
+    // 契约 §4.1:listen 仅 {type:"listen",data:{state:"start"}}。mode 是端侧本地概念,不进 wire。
+    (void)mode;
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "listen");
     cJSON* data = cJSON_CreateObject();
     cJSON_AddStringToObject(data, "state", "start");
-    if (!ShouldUseBootstrap()) {
-        if (mode == kListeningModeRealtime) {
-            cJSON_AddStringToObject(data, "mode", "realtime");
-        } else if (mode == kListeningModeAutoStop) {
-            cJSON_AddStringToObject(data, "mode", "auto");
-        } else {
-            cJSON_AddStringToObject(data, "mode", "manual");
-        }
-    }
-    cJSON_AddItemToObject(root, "data", data);
-    SendText(JsonToString(root));
-}
-
-void WebsocketProtocol::SendStopListening() {
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "type", "listen");
-    cJSON* data = cJSON_CreateObject();
-    cJSON_AddStringToObject(data, "state", "stop");
     cJSON_AddItemToObject(root, "data", data);
     SendText(JsonToString(root));
 }
 
 void WebsocketProtocol::SendAbortSpeaking(AbortReason reason) {
+    // 契约 §6:语音/唤醒词插话打断**不发** abort(服务端自动取消旧轮,发了会误杀刚起的新轮);
+    // 只有用户「按键手动停止」(kAbortReasonNone)才发 {type:"abort"}(无 data)。
+    if (reason != kAbortReasonNone) {
+        return;
+    }
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "abort");
-    if (reason == kAbortReasonWakeWordDetected) {
-        cJSON* data = cJSON_CreateObject();
-        cJSON_AddStringToObject(data, "reason", "wake_word_detected");
-        cJSON_AddItemToObject(root, "data", data);
-    }
     SendText(JsonToString(root));
+}
+
+void WebsocketProtocol::SendDeviceStatus() {
+    SendText(GetStatusMessage());
 }

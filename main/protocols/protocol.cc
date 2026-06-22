@@ -56,68 +56,6 @@ void Protocol::SetError(const std::string& message) {
     }
 }
 
-void Protocol::SendAbortSpeaking(AbortReason reason) {
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
-    cJSON_AddStringToObject(root, "type", "abort");
-    if (reason == kAbortReasonWakeWordDetected) {
-        cJSON_AddStringToObject(root, "reason", "wake_word_detected");
-    }
-    std::string message = ToJsonString(root);
-    if (message.empty()) {
-        ESP_LOGE(TAG, "Failed to build abort message");
-        return;
-    }
-    SendText(message);
-}
-
-void Protocol::SendWakeWordDetected(const std::string& wake_word) {
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
-    cJSON_AddStringToObject(root, "type", "listen");
-    cJSON_AddStringToObject(root, "state", "detect");
-    cJSON_AddStringToObject(root, "text", wake_word.c_str());
-    std::string json = ToJsonString(root);
-    if (json.empty()) {
-        ESP_LOGE(TAG, "Failed to build wake word message");
-        return;
-    }
-    SendText(json);
-}
-
-void Protocol::SendStartListening(ListeningMode mode) {
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
-    cJSON_AddStringToObject(root, "type", "listen");
-    cJSON_AddStringToObject(root, "state", "start");
-    if (mode == kListeningModeRealtime) {
-        cJSON_AddStringToObject(root, "mode", "realtime");
-    } else if (mode == kListeningModeAutoStop) {
-        cJSON_AddStringToObject(root, "mode", "auto");
-    } else {
-        cJSON_AddStringToObject(root, "mode", "manual");
-    }
-    std::string message = ToJsonString(root);
-    if (message.empty()) {
-        ESP_LOGE(TAG, "Failed to build start listening message");
-        return;
-    }
-    SendText(message);
-}
-
-void Protocol::SendStopListening() {
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
-    cJSON_AddStringToObject(root, "type", "listen");
-    cJSON_AddStringToObject(root, "state", "stop");
-    std::string message = ToJsonString(root);
-    if (message.empty()) {
-        ESP_LOGE(TAG, "Failed to build stop listening message");
-        return;
-    }
-    SendText(message);
-}
-
 void Protocol::SendMcpMessage(const std::string& payload) {
     cJSON* payload_json = cJSON_ParseWithLength(payload.c_str(), payload.size());
     if (payload_json == nullptr) {
@@ -126,7 +64,6 @@ void Protocol::SendMcpMessage(const std::string& payload) {
     }
 
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
     cJSON_AddStringToObject(root, "type", "mcp");
     cJSON_AddItemToObject(root, "payload", payload_json);
     std::string message = ToJsonString(root);
@@ -138,7 +75,11 @@ void Protocol::SendMcpMessage(const std::string& payload) {
 }
 
 bool Protocol::IsTimeout() const {
-    const int kTimeoutSeconds = 120;
+    // 常驻连接:设备不主动 ping,靠服务端每 ~60s 的 WS ping + 库自动 pong 维持 TCP。
+    // 这里的应用层超时只兜底「真死连接」,须显著大于契约的 ~150s 离线窗口,避免空闲时误判触发重连churn。
+    // ⚠️ 待硬件验证:底层 WebSocket 库收到服务端 ping 时是否刷新 last_incoming_time_(经 OnData)。
+    //    若不刷新,长时间空闲仍会在此超时——届时应在库层把收到 ping 也算作「有活动」。
+    const int kTimeoutSeconds = 300;
     auto now = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_incoming_time_);
     bool timeout = duration.count() > kTimeoutSeconds;

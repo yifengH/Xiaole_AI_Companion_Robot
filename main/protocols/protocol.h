@@ -16,22 +16,6 @@ struct AudioStreamPacket {
     std::vector<uint8_t> payload;
 };
 
-struct BinaryProtocol2 {
-    uint16_t version;
-    uint16_t type;          // Message type (0: OPUS, 1: JSON)
-    uint32_t reserved;      // Reserved for future use
-    uint32_t timestamp;     // Timestamp in milliseconds (used for server-side AEC)
-    uint32_t payload_size;  // Payload size in bytes
-    uint8_t payload[];      // Payload data
-} __attribute__((packed));
-
-struct BinaryProtocol3 {
-    uint8_t type;
-    uint8_t reserved;
-    uint16_t payload_size;
-    uint8_t payload[];
-} __attribute__((packed));
-
 enum AbortReason {
     kAbortReasonNone,
     kAbortReasonWakeWordDetected
@@ -70,10 +54,12 @@ public:
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
-    virtual void SendWakeWordDetected(const std::string& wake_word);
-    virtual void SendStartListening(ListeningMode mode);
-    virtual void SendStopListening();
-    virtual void SendAbortSpeaking(AbortReason reason);
+    // 设备→服务端控制帧(契约 §4.1):listen(state:"start") / abort。mode 仅供端侧本地逻辑,不进 wire。
+    virtual void SendStartListening(ListeningMode mode) = 0;
+    virtual void SendAbortSpeaking(AbortReason reason) = 0;
+    // 设备状态周期上报(常驻连接)。
+    virtual void SendDeviceStatus() = 0;
+    // MCP 设备能力工具通道(设备内部 McpServer ⟷ 服务端)。当前后端契约未启用,保留设备侧管道。
     virtual void SendMcpMessage(const std::string& message);
 
 protected:
