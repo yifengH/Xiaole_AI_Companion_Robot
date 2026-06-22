@@ -6,6 +6,7 @@
 #include "companion_protocol.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
+#include "companion_mcp_tools.h"
 #include "assets.h"
 #include "settings.h"
 #include "alarm_manager.h"
@@ -98,6 +99,8 @@ void Application::Initialize() {
     auto& mcp_server = McpServer::GetInstance();
     mcp_server.AddCommonTools();
     mcp_server.AddUserOnlyTools();
+    // 我方设备能力工具(闹钟等)外部注册,不焊进上游 mcp_server.cc。
+    AddCompanionMcpTools();
 
     // Set network event callback for UI updates and network state handling
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
