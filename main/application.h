@@ -13,7 +13,7 @@
 #include <functional>
 
 #include "protocol.h"
-#include "ota.h"
+#include "companion_ota.h"
 #include "audio_service.h"
 #include "device_state.h"
 #include "device_state_machine.h"
@@ -138,7 +138,7 @@ private:
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
-    std::unique_ptr<Ota> ota_;
+    std::unique_ptr<CompanionOta> ota_;
 
     bool network_ready_ = false;        // 网络是否就绪(常驻连接的前提)
     int last_reconnect_tick_ = -1000;   // 上次发起(重)连的 clock tick,用于退避

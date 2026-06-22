@@ -344,7 +344,7 @@ void Application::HandleActivationDoneEvent() {
 
 void Application::ActivationTask() {
     // Create OTA object (仅用于标记当前固件有效 + 取版本号;升级走 WSS update 帧)
-    ota_ = std::make_unique<Ota>();
+    ota_ = std::make_unique<CompanionOta>();
 
     // Check for new assets version(设备内部资源分区,非接入协议)
     CheckAssetsVersion();
@@ -959,7 +959,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& pac
     audio_service_.Stop();
     vTaskDelay(pdMS_TO_TICKS(1000));
 
-    bool upgrade_success = Ota::Upgrade(upgrade_url, package_hash, package_size, [this, display](int progress, size_t speed) {
+    bool upgrade_success = CompanionOta::Upgrade(upgrade_url, package_hash, package_size, [this, display](int progress, size_t speed) {
         char buffer[32];
         snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
         Schedule([display, message = std::string(buffer)]() {
