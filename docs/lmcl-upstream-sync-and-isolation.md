@@ -69,10 +69,10 @@ git switch main && git merge upstream/main      # 把上游并进我们的 main
 ## 5. 分阶段执行 + 验收
 
 每阶段一组提交,**单独可审、可回滚**;每阶段后 `git merge upstream/main` 跑一遍,量化冲突面是否下降。
-- 阶段 A(Tier 1):协议/OTA/MCP 工具抽离 + 恢复 MQTT。**最大收益,无硬件依赖**。
-- 阶段 B(Tier 2):建 `boards/lmcl-box-v1/`(待 §3 确认)。
-- 阶段 C(Tier 3):音频/显示逐项下沉,留档剩余 hook。
-- **验收**:本机无法编译 ESP-IDF;每阶段需你在硬件上 build+烧录验证。重点回归:Bootstrap→配对→连麦→打断→OTA→常驻重连。
+- 阶段 A(Tier 1)✅ 已完成:协议/OTA/MCP 工具抽离 + 恢复 MQTT。**最大收益,无硬件依赖**。
+- 阶段 B(Tier 2)✅ 已完成:建 `boards/lmcl-box-v1/`,bread 参考板还原上游。
+- 阶段 C(Tier 3)✅ 已审计:音频/显示逐项评估,结论=**保留为已记录 hook**(理由见 §8)。
+- **验收**:本机无法编译 ESP-IDF;须你在硬件上 build+烧录验证。重点回归:Bootstrap→配对→连麦→打断→OTA→常驻重连 + 闹钟 + 点屏。
 
 ## 6. 风险
 
@@ -135,3 +135,47 @@ git merge upstream/main            # 这里产生合并"圆";有冲突就解(见
 - **频率低**:按需即可——上游发版(打 tag)、需要某个上游 bugfix/新板子、或固定每月一次。**不是每天**。
 - **时机**:挑 main 相对安静时做(进行中的大功能少),解冲突更省心。merge 非破坏性,**不需要冻结开发**。
 - **当前历史已就绪**:同事的 import 是"叠在上游提交 `cc7cbe7` 之上"(不是压扁的),所以 git 能找到共同祖先做三方合并,第一次 `git merge upstream/main` 机制上没问题。
+
+## 8. 执行结果与「已知 hook 登记」(Tier1–3 完成)
+
+### 8.1 已彻底隔离(抽进我方独立文件,与上游零冲突)
+
+这些是**新增文件**(`git diff upstream --diff-filter=A`),上游没有、永不冲突;我方接入逻辑全在这里:
+
+| 文件 | 内容 |
+|---|---|
+| `protocols/companion_protocol.{h,cc}` | `CompanionProtocol`:Bootstrap+{type,data}帧+0x01音频+常驻连接+300s超时 |
+| `companion_ota.{h,cc}` | `CompanionOta`:WSS update 帧驱动的 sha256/size 校验刷写 |
+| `companion_mcp_tools.{h,cc}` | 闹钟等设备能力 MCP 工具(外部 `AddTool` 注册) |
+| `device_identity.{h,cc}` | 设备 sn/secret(NVS 高熵随机,非 MAC 派生) |
+| `alarm_manager.{h,cc}` | 闹钟管理 |
+| `boards/lmcl-box-v1/*` | 我方板:屏/引脚/继电器/LED/DFPlayer |
+| `Kconfig.lmcl` | 我方追加配置(DEVICE_*/LMCL_*/Alarm),projbuild 仅一行 rsource |
+
+对应的上游共享文件已 **`git checkout upstream` 字节还原**:`protocol.cc`、`websocket_protocol.*`、`mqtt_protocol.*`、`ota.*`、`mcp_server.cc`、`bread-compact-wifi(-lcd)/*`、`boards/common/`。
+
+### 8.2 已知 hook 登记(剩余 diverge 的共享文件 = 合并时 **keep-ours**)
+
+下列文件仍与上游有差异,但都是**有意的、嵌进上游类生命周期/管线的就地修改**,**无法在不重写时序/声学敏感代码的前提下干净抽离**。本机无 ESP-IDF、无硬件,强行抽离=镀金且有真实回归风险(违背「激进度按可逆性分配」)。故**决定保留在原处**,在此登记;`git merge upstream` 时这些文件冲突一律 **keep-ours + 人工核对上游是否在同段有新逻辑**:
+
+| 文件 | 我方改动 | 为何不抽 |
+|---|---|---|
+| `application.cc/.h` | 帧分发(tts/stt/sleep/update/error/pairingCode)、常驻连接重连、状态上报、唤醒流 | 这**就是**我们的应用主逻辑,非"可外置能力";上游 application 是骨架,我们的业务必然在此 |
+| `audio/audio_service.{cc,h}` | `OPUS_FRAME_DURATION_MS 60→20`(20ms 帧契约)、队列加大、ducking/逐包增益、PlaySound 扩参 | 修改上游音频管线内部,非新增;时序敏感 |
+| `audio/codecs/no_audio_codec.{cc,h}` | 设备端 AEC 软件参考(Write/Read 改造、output_buffer/slice/ref_mutex) | 改 codec 读写内部,**声学关键**,改错=回声消除失效,只能上机验 |
+| `audio/processors/afe_audio_processor.cc`、`wake_words/afe_wake_word.cc` | 各 1~2 行 | 极小,抽离不值 |
+| `display/{display,lcd_display,oled_display}.{cc,h}`、`lvgl_display/lvgl_display.{cc,h}` | 闹钟全屏覆盖层 + 状态栏闹钟图标 | 嵌进 LvglDisplay 构造/析构/UpdateStatusBar **生命周期**;独立成类需插继承链,风险高 |
+| `Kconfig.projbuild` | 板子选项条目 + LCD depends 加我方板 + rsource 钩子;`USE_DEVICE_AEC` 改 default y/去白名单 + 新增 `USE_REALTIME_CHAT` | 选项条目/depends 必须在上游 choice 内;AEC 收敛涉及 `USE_AUDIO_PROCESSOR` 依赖子交互,无硬件不敢动 |
+| `protocol.h` | 2 处:AudioStreamPacket 的 ducking/gain 字段、空默认虚函数 `SendDeviceStatus()` | 已是最小 hook(+7 行) |
+| `CMakeLists.txt` | SOURCES 换我方文件 + lmcl-box-v1 板分支 | 构建清单,必然差异 |
+
+> **后续可选深抽**(需硬件在手再做,否则不划算):① `no_audio_codec` 的设备 AEC 改造做成 `boards/lmcl-box-v1/` 私有 codec 子类,还原共享 codec;② 显示闹钟覆盖层用「LvglDisplay 持有一个 AlarmOverlay 组合对象」抽出;③ `USE_DEVICE_AEC` 还原上游白名单结构 + 把 `BOARD_TYPE_LMCL_BOX_V1` 加进去 + `default y if` 我方板。**三项都需上机验证 AEC/显示,当前阶段刻意不做。**
+
+### 8.3 冲突面量化(三阶段成效)
+
+| 节点 | 与上游 diverge 的共享文件 | 行数 |
+|---|---|---|
+| sync 后(重构前) | 27 | +1394 / -818 |
+| Tier1+2+3 后 | 17 | +688 / -255 |
+
+协议/OTA/MCP/参考板**四大冲突源已归零**;剩余 17 个均为 §8.2 登记在案的有意 hook,合并可控。
