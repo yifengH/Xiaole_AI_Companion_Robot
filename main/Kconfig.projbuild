@@ -6,34 +6,8 @@ config OTA_URL
     help
         The application will access this URL to check for new firmwares and server address.
 
-config DEVICE_BOOTSTRAP_URL
-    string "Self-hosted device Bootstrap URL"
-    default "https://api.lmcl.xyz/grpc-gateway/CompanionDeviceService/Bootstrap"
-    help
-        When set, the websocket protocol will POST {sn, secret} to this URL,
-        read data.deviceToken and data.config.endpoints.websocket from the
-        response, then connect to the websocket endpoint with ?token=.
-        This follows the self-hosted server device access contract.
-
-config DEVICE_FACTORY_SECRET
-    string "Development factory secret"
-    default ""
-    help
-        Development fallback for the device factory secret used by Bootstrap.
-        Production builds should store a per-device random secret in NVS key
-        websocket.secret instead of using a shared sdkconfig value.
-
-config DEVICE_MODEL_CODE
-    string "Device Model Code (deviceModelCode)"
-    default "lmcl-box-v1"
-    help
-        Default model code reported in the status frame for the self-hosted server.
-
-config LMCL_SN_PREFIX
-    string "LMCL Serial Number prefix"
-    default "lmcl-"
-    help
-        Prefix used by the MAC-derived LMCL serial number.
+# 黎明缠论(lmcl)定制配置:DEVICE_* / LMCL_* / Alarm。独立成文件,降低跟随上游的冲突面。
+rsource "Kconfig.lmcl"
 
 choice
     prompt "Flash Assets"
@@ -187,6 +161,9 @@ choice BOARD_TYPE
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_BREAD_COMPACT_WIFI_CAM
         bool "Bread Compact WiFi + LCD + Camera (面包板)"
+        depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_LMCL_BOX_V1
+        bool "LMCL Box v1 (黎明缠论 陪伴设备,带屏)"
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_BREAD_COMPACT_ML307
         bool "Bread Compact ML307/EC801E (面包板 4G)"
@@ -741,7 +718,7 @@ choice DISPLAY_OLED_TYPE
 endchoice
 
 choice DISPLAY_LCD_TYPE
-    depends on BOARD_TYPE_BREAD_COMPACT_WIFI_LCD || BOARD_TYPE_BREAD_COMPACT_ESP32_LCD || BOARD_TYPE_CGC || BOARD_TYPE_BREAD_COMPACT_WIFI_CAM
+    depends on BOARD_TYPE_BREAD_COMPACT_WIFI_LCD || BOARD_TYPE_BREAD_COMPACT_ESP32_LCD || BOARD_TYPE_CGC || BOARD_TYPE_BREAD_COMPACT_WIFI_CAM || BOARD_TYPE_LMCL_BOX_V1
     prompt "LCD Type"
     default LCD_ST7789_240X320
     help
@@ -1101,29 +1078,6 @@ menu "TAIJIPAI_S3_CONFIG"
     default y
     help
         启动双声道
-endmenu
-
-menu "Alarm Settings"
-    config ALARM_RING_INTERVAL_SECONDS
-        int "Ring interval between successive alarm sounds (seconds)"
-        default 8
-        range 3 60
-        help
-            每次闹钟铃声播放完后，等待多少秒再播放下一遍。
-
-    config ALARM_GAIN_PERCENT
-        int "Alarm playback gain (%)"
-        default 180
-        range 50 250
-        help
-            闹钟音量放大系数（百分比）。100=原始音量，180=放大80%，50=减小50%。
-
-    config ALARM_NOTIFICATION_DURATION_MS
-        int "Screen notification display duration (ms)"
-        default 8000
-        range 1000 30000
-        help
-            每次响铃时屏幕通知消息的显示持续时长（毫秒）。
 endmenu
 
 endmenu

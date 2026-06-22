@@ -4,7 +4,7 @@
 #include <driver/gpio.h>
 
 #define AUDIO_INPUT_SAMPLE_RATE  16000
-#define AUDIO_OUTPUT_SAMPLE_RATE 24000
+#define AUDIO_OUTPUT_SAMPLE_RATE 16000  // 24000
 
 // 如果使用 Duplex I2S 模式，请注释下面一行
 #define AUDIO_I2S_METHOD_SIMPLEX
@@ -43,6 +43,7 @@
 #define DISPLAY_CS_PIN        GPIO_NUM_41
 
 
+//	下面是2.0IPS屏幕原版显示代码
 #ifdef CONFIG_LCD_ST7789_240X320
 #define LCD_TYPE_ST7789_SERIAL
 #define DISPLAY_WIDTH   240
@@ -57,6 +58,24 @@
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
 #define DISPLAY_SPI_MODE 0
 #endif
+//  ---------------------------------------
+
+//  下面就是2.0IPS屏幕更改显示方面的代码，已经做了修改（看下面的注释）
+// #ifdef CONFIG_LCD_ST7789_240X320
+// #define LCD_TYPE_ST7789_SERIAL
+// #define DISPLAY_WIDTH   320			// 这儿原文件是240
+// #define DISPLAY_HEIGHT  240			// 这儿原文件是320
+// #define DISPLAY_MIRROR_X true			// 这儿原文件是false ，如果是反向横向，这儿要设置为false
+// #define DISPLAY_MIRROR_Y false         // 如果是反向横向，这儿要设置为true
+// #define DISPLAY_SWAP_XY true			// 这儿原文件是false
+// #define DISPLAY_INVERT_COLOR    true	// 如果是2.4屏幕，这儿就要修改为false
+// #define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_RGB
+// #define DISPLAY_OFFSET_X  0
+// #define DISPLAY_OFFSET_Y  0
+// #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
+// #define DISPLAY_SPI_MODE 0
+// #endif
+// ---------------------------------------
 
 #ifdef CONFIG_LCD_ST7789_240X320_NO_IPS
 #define LCD_TYPE_ST7789_SERIAL
@@ -103,20 +122,38 @@
 #define DISPLAY_SPI_MODE 0
 #endif
 
+// #ifdef CONFIG_LCD_ST7789_240X280
+// #define LCD_TYPE_ST7789_SERIAL
+// #define DISPLAY_WIDTH   240
+// #define DISPLAY_HEIGHT  280
+// #define DISPLAY_MIRROR_X false
+// #define DISPLAY_MIRROR_Y false
+// #define DISPLAY_SWAP_XY false
+// #define DISPLAY_INVERT_COLOR    true
+// #define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_RGB
+// #define DISPLAY_OFFSET_X  0
+// #define DISPLAY_OFFSET_Y  20
+// #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
+// #define DISPLAY_SPI_MODE 0
+// #endif
+
+// 下面是1.69屏幕的显示源码调整：已经将屏幕内容调整为横向显示，并做了位移
+//-----------------------------------
 #ifdef CONFIG_LCD_ST7789_240X280
 #define LCD_TYPE_ST7789_SERIAL
-#define DISPLAY_WIDTH   240
-#define DISPLAY_HEIGHT  280
-#define DISPLAY_MIRROR_X false
-#define DISPLAY_MIRROR_Y false
-#define DISPLAY_SWAP_XY false
+#define DISPLAY_WIDTH   280     // 原文件是240
+#define DISPLAY_HEIGHT  240     // 原文件是280
+#define DISPLAY_MIRROR_X true    //  如果是反向横向，这儿要设置为false
+#define DISPLAY_MIRROR_Y false    // 如果是反向横向，这儿要设置为true
+#define DISPLAY_SWAP_XY true    // 原文件是false
 #define DISPLAY_INVERT_COLOR    true
 #define DISPLAY_RGB_ORDER  LCD_RGB_ELEMENT_ORDER_RGB
-#define DISPLAY_OFFSET_X  0
-#define DISPLAY_OFFSET_Y  20
+#define DISPLAY_OFFSET_X  20    // 原文件是0
+#define DISPLAY_OFFSET_Y  0    // 原文件是20
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
 #define DISPLAY_SPI_MODE 0
 #endif
+//-----------------------------------
 
 #ifdef CONFIG_LCD_ST7789_240X240
 #define LCD_TYPE_ST7789_SERIAL
@@ -284,6 +321,6 @@
 
 
 // A MCP Test: Control a lamp
-#define LAMP_GPIO GPIO_NUM_18
+#define LAMP_GPIO GPIO_NUM_NC
 
 #endif // _BOARD_CONFIG_H_
