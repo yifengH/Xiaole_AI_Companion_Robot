@@ -3,7 +3,7 @@
 #include "display.h"
 #include "system_info.h"
 #include "audio_codec.h"
-#include "websocket_protocol.h"
+#include "companion_protocol.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
 #include "assets.h"
@@ -440,7 +440,7 @@ void Application::InitializeProtocol() {
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
     // 唯一接入方式:WSS + Bootstrap(见 docs/device-access.md)。不再有 MQTT/双协议选择。
-    protocol_ = std::make_unique<WebsocketProtocol>();
+    protocol_ = std::make_unique<CompanionProtocol>();
 
     protocol_->OnConnected([this]() {
         DismissAlert();
@@ -599,7 +599,7 @@ void Application::InitializeProtocol() {
                 cJSON_IsString(stage) ? stage->valuestring : "?",
                 cJSON_IsString(message) ? message->valuestring : "");
         } else if (strcmp(type->valuestring, "pairingCode") == 0 || strcmp(type->valuestring, "bound") == 0) {
-            // Handled by WebsocketProtocol so OpenAudioChannel can keep waiting for hello.
+            // Handled by CompanionProtocol so OpenAudioChannel can keep waiting for hello.
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
