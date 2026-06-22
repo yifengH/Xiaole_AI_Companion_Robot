@@ -10,6 +10,7 @@
 #include <mutex>
 #include <deque>
 #include <memory>
+#include <functional>
 
 #include "protocol.h"
 #include "ota.h"
@@ -110,6 +111,7 @@ public:
     bool UpgradeFirmware(const std::string& url, const std::string& package_hash = "", size_t package_size = 0, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
+    void RegisterMcpBroadcastCallback(std::function<void(const std::string&)> callback);
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
@@ -140,6 +142,9 @@ private:
 
     bool network_ready_ = false;        // 网络是否就绪(常驻连接的前提)
     int last_reconnect_tick_ = -1000;   // 上次发起(重)连的 clock tick,用于退避
+    std::function<void(const std::string&)> mcp_broadcast_callback_;
+
+    bool has_server_time_ = false;
     bool aborted_ = false;
     bool tts_audio_active_ = false;
     bool tts_stop_received_ = false;
