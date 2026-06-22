@@ -105,7 +105,9 @@ public:
 
     void Reboot();
     void WakeWordInvoke(const std::string& wake_word);
-    bool UpgradeFirmware(const std::string& url, const std::string& version = "");
+    // 走服务端 update 帧的固件升级:packageUrl + packageHash(sha256) + packageSize 校验后刷写。
+    // package_hash 空 / package_size 0 时跳过对应校验(供 MCP 手动指定 URL 升级这类设备内部入口用)。
+    bool UpgradeFirmware(const std::string& url, const std::string& package_hash = "", size_t package_size = 0, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
     void SetAecMode(AecMode mode);
@@ -136,7 +138,8 @@ private:
     AudioService audio_service_;
     std::unique_ptr<Ota> ota_;
 
-    bool has_server_time_ = false;
+    bool network_ready_ = false;        // 网络是否就绪(常驻连接的前提)
+    int last_reconnect_tick_ = -1000;   // 上次发起(重)连的 clock tick,用于退避
     bool aborted_ = false;
     bool tts_audio_active_ = false;
     bool tts_stop_received_ = false;
@@ -163,9 +166,8 @@ private:
 
     // Helper methods
     void CheckAssetsVersion();
-    void CheckNewVersion();
     void InitializeProtocol();
-    void ShowActivationCode(const std::string& code, const std::string& message);
+    void EnsureAudioChannelOpen();  // 常驻连接:确保 WSS 已连(未连则发起,成功后回到待唤醒)
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;
     

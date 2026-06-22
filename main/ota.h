@@ -7,52 +7,26 @@
 #include <esp_err.h>
 #include "board.h"
 
+// Ota 只负责固件「刷写」这一件事:下载 → 校验(sha256 + 大小)→ 写分区 → 切启动分区。
+// 「要不要升级、升到哪个版本」由服务端经 WSS 的 checkUpdate/update 帧回答(见 docs/device-access.md 第三部分),
+// 设备不做任何版本比较、不走任何 HTTP 配置/激活接口。
 class Ota {
 public:
-    Ota();
-    ~Ota();
+    Ota() = default;
+    ~Ota() = default;
 
-    esp_err_t CheckVersion();
-    esp_err_t Activate();
-    bool HasActivationChallenge() { return has_activation_challenge_; }
-    bool HasNewVersion() { return has_new_version_; }
-    bool HasMqttConfig() { return has_mqtt_config_; }
-    bool HasWebsocketConfig() { return has_websocket_config_; }
-    bool HasActivationCode() { return has_activation_code_; }
-    bool HasServerTime() { return has_server_time_; }
-    bool StartUpgrade(std::function<void(int progress, size_t speed)> callback);
-    static bool Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback);
+    // 标记当前运行固件有效(取消回滚)。OTA 后首次正常启动时调用。
     void MarkCurrentVersionValid();
 
-    const std::string& GetFirmwareVersion() const { return firmware_version_; }
-    const std::string& GetCurrentVersion() const { return current_version_; }
-    const std::string& GetFirmwareUrl() const { return firmware_url_; }
-    const std::string& GetActivationMessage() const { return activation_message_; }
-    const std::string& GetActivationCode() const { return activation_code_; }
-    std::string GetCheckVersionUrl();
+    // 当前运行固件版本(来自编译进固件的 app description),随 status 帧上报。
+    std::string GetCurrentVersion();
 
-private:
-    std::string activation_message_;
-    std::string activation_code_;
-    bool has_new_version_ = false;
-    bool has_mqtt_config_ = false;
-    bool has_websocket_config_ = false;
-    bool has_server_time_ = false;
-    bool has_activation_code_ = false;
-    bool has_serial_number_ = false;
-    bool has_activation_challenge_ = false;
-    std::string current_version_;
-    std::string firmware_version_;
-    std::string firmware_url_;
-    std::string activation_challenge_;
-    std::string serial_number_;
-    int activation_timeout_ms_ = 30000;
-
-    std::function<void(int progress, size_t speed)> upgrade_callback_;
-    std::vector<int> ParseVersion(const std::string& version);
-    bool IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion);
-    std::string GetActivationPayload();
-    std::unique_ptr<Http> SetupHttp();
+    // 下载固件并校验后刷写。expected_sha256_hex / expected_size 来自服务端 update 帧
+    // (packageHash / packageSize);校验不过即丢弃不装(契约硬性要求)。expected_size 为 0 表示不校验大小。
+    static bool Upgrade(const std::string& firmware_url,
+                        const std::string& expected_sha256_hex,
+                        size_t expected_size,
+                        std::function<void(int progress, size_t speed)> callback);
 };
 
 #endif // _OTA_H
