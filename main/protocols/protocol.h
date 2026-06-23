@@ -11,10 +11,28 @@ struct AudioStreamPacket {
     int sample_rate = 0;
     int frame_duration = 0;
     uint32_t timestamp = 0;
+    // [lmcl hook] 播放侧元数据:闪避(ducking)与逐包增益,供 audio_service 混音用。
+    // 属 Tier3 音频定制,暂随包体传递;待音频层下沉时再评估去留。
     bool ducking_eligible = false;
     int playback_gain_percent = 100;
     std::vector<uint8_t> payload;
 };
+
+struct BinaryProtocol2 {
+    uint16_t version;
+    uint16_t type;          // Message type (0: OPUS, 1: JSON)
+    uint32_t reserved;      // Reserved for future use
+    uint32_t timestamp;     // Timestamp in milliseconds (used for server-side AEC)
+    uint32_t payload_size;  // Payload size in bytes
+    uint8_t payload[];      // Payload data
+} __attribute__((packed));
+
+struct BinaryProtocol3 {
+    uint8_t type;
+    uint8_t reserved;
+    uint16_t payload_size;
+    uint8_t payload[];
+} __attribute__((packed));
 
 enum AbortReason {
     kAbortReasonNone,
@@ -54,13 +72,14 @@ public:
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
-    // 设备→服务端控制帧(契约 §4.1):listen(state:"start") / abort。mode 仅供端侧本地逻辑,不进 wire。
-    virtual void SendStartListening(ListeningMode mode) = 0;
-    virtual void SendAbortSpeaking(AbortReason reason) = 0;
-    // 设备状态周期上报(常驻连接)。
-    virtual void SendDeviceStatus() = 0;
-    // MCP 设备能力工具通道(设备内部 McpServer ⟷ 服务端)。当前后端契约未启用,保留设备侧管道。
+    virtual void SendWakeWordDetected(const std::string& wake_word);
+    virtual void SendStartListening(ListeningMode mode);
+    virtual void SendStopListening();
+    virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    // [lmcl hook] 设备状态周期上报(常驻连接)。仅 CompanionProtocol 实现;其余协议继承空默认,
+    // 故新增此虚函数不影响上游 Websocket/Mqtt 协议的编译。
+    virtual void SendDeviceStatus() {}
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;
@@ -72,7 +91,7 @@ protected:
     std::function<void()> on_disconnected_;
 
     int server_sample_rate_ = 24000;
-    int server_frame_duration_ = 20;
+    int server_frame_duration_ = 60;
     bool error_occurred_ = false;
     std::string session_id_;
     std::chrono::time_point<std::chrono::steady_clock> last_incoming_time_;

@@ -20,20 +20,15 @@ public:
     bool OpenAudioChannel() override;
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
-    void SendStartListening(ListeningMode mode) override;
-    void SendAbortSpeaking(AbortReason reason) override;
-    void SendDeviceStatus() override;
 
 private:
     EventGroupHandle_t event_group_handle_;
     std::unique_ptr<WebSocket> websocket_;
-    bool saw_pairing_code_ = false;
+    int version_ = 1;
 
     void ParseServerHello(const cJSON* root);
     bool SendText(const std::string& text) override;
-    std::string GetStatusMessage();
-    std::string GetCheckUpdateMessage();
-    bool Bootstrap(std::string& websocket_url);
+    std::string GetHelloMessage();
 };
 
 #endif

@@ -1,0 +1,56 @@
+# 黎明缠论(lmcl)定制配置 —— 由 main/Kconfig.projbuild 用 rsource 引入。
+# 单独成文件,使上游 Kconfig.projbuild 只留一行 hook,降低跟随上游时的冲突面。
+# 仅放「我方新增」的配置;改上游既有配置(如 USE_DEVICE_AEC)仍在 Kconfig.projbuild 就地改。
+
+config DEVICE_BOOTSTRAP_URL
+    string "Self-hosted device Bootstrap URL"
+    default "https://api.lmcl.xyz/grpc-gateway/CompanionDeviceService/Bootstrap"
+    help
+        When set, the websocket protocol will POST {sn, secret} to this URL,
+        read data.deviceToken and data.config.endpoints.websocket from the
+        response, then connect to the websocket endpoint with ?token=.
+        This follows the self-hosted server device access contract.
+
+config DEVICE_FACTORY_SECRET
+    string "Development factory secret"
+    default ""
+    help
+        Development fallback for the device factory secret used by Bootstrap.
+        Production builds should store a per-device random secret in NVS key
+        websocket.secret instead of using a shared sdkconfig value.
+
+config DEVICE_MODEL_CODE
+    string "Device Model Code (deviceModelCode)"
+    default "lmcl-box-v1"
+    help
+        Default model code reported in the status frame for the self-hosted server.
+
+config LMCL_SN_PREFIX
+    string "LMCL Serial Number prefix"
+    default "lmcl-"
+    help
+        Prefix used by the per-device random LMCL serial number
+        (生成于 device_identity:首启写入 NVS 的高熵随机串,非 MAC 派生)。
+
+menu "Alarm Settings"
+    config ALARM_RING_INTERVAL_SECONDS
+        int "Ring interval between successive alarm sounds (seconds)"
+        default 8
+        range 3 60
+        help
+            每次闹钟铃声播放完后,等待多少秒再播放下一遍。
+
+    config ALARM_GAIN_PERCENT
+        int "Alarm playback gain (%)"
+        default 180
+        range 50 250
+        help
+            闹钟音量放大系数(百分比)。100=原始音量,180=放大80%,50=减小50%。
+
+    config ALARM_NOTIFICATION_DURATION_MS
+        int "Screen notification display duration (ms)"
+        default 8000
+        range 1000 30000
+        help
+            每次响铃时屏幕通知消息的显示持续时长(毫秒)。
+endmenu
