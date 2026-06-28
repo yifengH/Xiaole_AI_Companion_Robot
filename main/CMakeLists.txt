@@ -43,6 +43,8 @@ set(SOURCES "audio/audio_codec.cc"
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
 
+# sensors
+list(APPEND INCLUDE_DIRS "sensors")
 # Add board common files
 list(APPEND SOURCES
     "boards/common/board.cc"
@@ -63,6 +65,7 @@ list(APPEND SOURCES
     "boards/common/sy6970.cc"
     "boards/common/system_reset.cc"
 )
+list(APPEND SOURCES "sensors/bmi270.cc")
 if(CONFIG_XIAOZHI_USE_ETHERNET)
     list(APPEND SOURCES "boards/common/ethernet_board.cc")
 endif()
@@ -1082,6 +1085,8 @@ add_custom_command(
             --output "${LANG_HEADER}"
     DEPENDS
         ${LANG_JSON}
+        ${LANG_SOUNDS}
+        ${COMMON_SOUNDS}
         ${PROJECT_DIR}/scripts/gen_lang.py
     COMMENT "Generating ${LANG_DIR} language config"
 )

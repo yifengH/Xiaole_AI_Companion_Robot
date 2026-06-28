@@ -77,6 +77,7 @@ public:
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    virtual void SendDeviceEvent(const std::string& event, const std::string& instruction);
     // [lmcl hook] 设备状态周期上报(常驻连接)。仅 CompanionProtocol 实现;其余协议继承空默认,
     // 故新增此虚函数不影响上游 Websocket/Mqtt 协议的编译。
     virtual void SendDeviceStatus() {}
@@ -102,4 +103,3 @@ protected:
 };
 
 #endif // PROTOCOL_H
-

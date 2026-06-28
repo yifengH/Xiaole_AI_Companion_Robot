@@ -396,6 +396,19 @@ void CompanionProtocol::SendDeviceStatus() {
     SendText(GetStatusMessage());
 }
 
+void CompanionProtocol::SendDeviceEvent(const std::string& event, const std::string& instruction) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "deviceEvent");
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "event", event.c_str());
+    cJSON_AddStringToObject(data, "source", "bmi270");
+    cJSON_AddStringToObject(data, "text", instruction.c_str());
+    cJSON_AddStringToObject(data, "instruction", instruction.c_str());
+    cJSON_AddBoolToObject(data, "requestReply", true);
+    cJSON_AddItemToObject(root, "data", data);
+    SendText(JsonToString(root));
+}
+
 void CompanionProtocol::SendMcpMessage(const std::string& payload) {
     cJSON* payload_json = cJSON_ParseWithLength(payload.c_str(), payload.size());
     if (payload_json == nullptr) {

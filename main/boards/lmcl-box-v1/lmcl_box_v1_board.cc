@@ -9,6 +9,7 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "assets/lang_config.h"
+#include "sensors/bmi270.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -34,6 +35,7 @@ private:
     Button touch_button_;
     Button volume_up_button_;
     Button volume_down_button_;
+    BMI270* bmi270_ = nullptr;
 
     void InitializeDisplayI2c() {
         i2c_master_bus_config_t bus_config = {
@@ -49,6 +51,19 @@ private:
             },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &display_i2c_bus_));
+    }
+
+    void ProbeBmi270I2c() {
+        const uint8_t addrs[] = {
+            0x3C,
+            IMU_BMI270_ADDR_LOW,
+            IMU_BMI270_ADDR_HIGH,
+        };
+
+        for (uint8_t addr : addrs) {
+            esp_err_t ret = i2c_master_probe(display_i2c_bus_, addr, pdMS_TO_TICKS(100));
+            ESP_LOGI(TAG, "I2C probe 0x%02X: %s", addr, esp_err_to_name(ret));
+        }
     }
 
     void InitializeOledDisplay() {
@@ -153,6 +168,25 @@ private:
         (void)jidian_G;
     }
 
+    void InitializeBmi270() {
+        bmi270_ = new BMI270(display_i2c_bus_, IMU_BMI270_ADDR);
+        if (bmi270_->Init()) {
+            bmi270_->OnShake([]() {
+                ESP_LOGI(TAG, "BMI270 shake event triggered");
+                Application::GetInstance().Schedule([]() {
+                    Application::GetInstance().PlaySound(Lang::Sounds::OGG_AIYA_DIZZY);
+                });
+                Application::GetInstance().SendDeviceEvent(
+                    "imu.shake",
+                    "用户正在摇晃我，请用可爱的语气回应。"
+                );
+            });
+            bmi270_->Start();
+        } else {
+            ESP_LOGW(TAG, "BMI270 init failed at 0x%02X", IMU_BMI270_ADDR);
+        }
+    }
+
 public:
     LmclBoxV1Board() :
         boot_button_(BOOT_BUTTON_GPIO),
@@ -161,6 +195,8 @@ public:
         volume_down_button_(VOLUME_DOWN_BUTTON_GPIO) {
         InitializeDisplayI2c();
         InitializeOledDisplay();
+        ProbeBmi270I2c();
+        InitializeBmi270();
         InitializeButtons();
         InitializeTools();
     }

@@ -23,6 +23,7 @@ public:
     void SendStartListening(ListeningMode mode) override;
     void SendAbortSpeaking(AbortReason reason) override;
     void SendDeviceStatus() override;
+    void SendDeviceEvent(const std::string& event, const std::string& instruction) override;
     // MCP 设备能力工具通道:契约用 {type:"mcp",payload} 信封(无 session_id),覆盖基类默认格式。
     // 当前后端契约未启用 mcp 帧,保留设备侧管道以便将来接入。
     void SendMcpMessage(const std::string& payload) override;

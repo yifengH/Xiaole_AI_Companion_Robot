@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "alarm_manager.h"
 
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <esp_log.h>
@@ -21,6 +22,35 @@
 
 #define TAG "Application"
 
+namespace {
+bool IsUtf8ContinuationByte(unsigned char ch) {
+    return (ch & 0xC0) == 0x80;
+}
+
+size_t CountUtf8Characters(const std::string& text) {
+    size_t count = 0;
+    for (unsigned char ch : text) {
+        if (!IsUtf8ContinuationByte(ch)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+uint32_t EstimateTtsCaptionDurationMs(const std::string& text) {
+    const size_t char_count = CountUtf8Characters(text);
+    if (char_count == 0) {
+        return 1;
+    }
+    constexpr uint32_t kMsPerChar = 180;
+    constexpr uint32_t kMinDurationMs = 120;
+    constexpr uint32_t kMaxDurationMs = 4000;
+    uint64_t estimate = static_cast<uint64_t>(char_count) * kMsPerChar;
+    estimate = std::max<uint64_t>(estimate, kMinDurationMs);
+    estimate = std::min<uint64_t>(estimate, kMaxDurationMs);
+    return static_cast<uint32_t>(estimate);
+}
+}
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -466,8 +496,11 @@ void Application::InitializeProtocol() {
                 }
             });
         }
+        const uint32_t packet_duration_ms = packet->frame_duration > 0 ? packet->frame_duration : OPUS_FRAME_DURATION_MS;
         if (!audio_service_.PushPacketToDecodeQueue(std::move(packet), false)) {
             ESP_LOGW(TAG, "Failed to queue incoming audio packet");
+        } else {
+            NoteTtsAudioReceived(packet_duration_ms);
         }
     });
     
@@ -484,6 +517,7 @@ void Application::InitializeProtocol() {
         aborted_ = true;
         tts_audio_active_ = false;
         tts_stop_received_ = false;
+        ResetTtsCaption();
         audio_service_.ResetDecoder();
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
@@ -501,6 +535,30 @@ void Application::InitializeProtocol() {
             ESP_LOGW(TAG, "Incoming message missing type");
             return;
         }
+        auto handle_tts_start = [this]() {
+            ResetTtsCaption();
+            audio_service_.ResetDecoder();
+            aborted_ = false;
+            tts_audio_active_ = true;
+            tts_stop_received_ = false;
+            Schedule([this]() {
+                aborted_ = false;
+                SetDeviceState(kDeviceStateSpeaking);
+            });
+        };
+        auto handle_tts_stop = [this]() {
+            tts_audio_active_ = false;
+            tts_stop_received_ = true;
+            Schedule([this]() {
+                if (GetDeviceState() == kDeviceStateSpeaking) {
+                    if (listening_mode_ == kListeningModeManualStop) {
+                        SetDeviceState(kDeviceStateIdle);
+                    } else {
+                        SetDeviceState(kDeviceStateListening);
+                    }
+                }
+            });
+        };
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(body, "state");
             if (!cJSON_IsString(state)) {
@@ -508,40 +566,32 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
-                audio_service_.ResetDecoder();
-                aborted_ = false;
-                tts_audio_active_ = true;
-                tts_stop_received_ = false;
-                Schedule([this]() {
-                    aborted_ = false;
-                    SetDeviceState(kDeviceStateSpeaking);
-                });
+                handle_tts_start();
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                tts_audio_active_ = false;
-                tts_stop_received_ = true;
-                Schedule([this]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
-                    }
-                });
+                handle_tts_stop();
             } else if (strcmp(state->valuestring, "sentence") == 0) {
                 auto text = cJSON_GetObjectItem(body, "text");
                 if (cJSON_IsString(text)) {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    Schedule([display, message = std::string(text->valuestring)]() {
-                        display->SetChatMessage("assistant", message.c_str());
-                    });
+                    QueueTtsCaption(text->valuestring);
                 }
+            }
+        } else if (strcmp(type->valuestring, "audioStart") == 0 || strcmp(type->valuestring, "turnStart") == 0) {
+            handle_tts_start();
+        } else if (strcmp(type->valuestring, "audioEnd") == 0 || strcmp(type->valuestring, "turnEnd") == 0) {
+            handle_tts_stop();
+        } else if (strcmp(type->valuestring, "subtitle") == 0) {
+            auto text = cJSON_GetObjectItem(body, "text");
+            if (cJSON_IsString(text)) {
+                ESP_LOGI(TAG, "<< %s", text->valuestring);
+                QueueTtsCaption(text->valuestring);
             }
         } else if (strcmp(type->valuestring, "stt") == 0) {
             if (tts_audio_active_ || GetDeviceState() == kDeviceStateSpeaking) {
                 aborted_ = true;
                 tts_audio_active_ = false;
                 tts_stop_received_ = false;
+                ResetTtsCaption();
                 audio_service_.ResetDecoder();
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
@@ -568,6 +618,7 @@ void Application::InitializeProtocol() {
             aborted_ = true;
             tts_audio_active_ = false;
             tts_stop_received_ = false;
+            ResetTtsCaption();
             audio_service_.ResetDecoder();
             Schedule([this]() {
                 auto s = GetDeviceState();
@@ -779,6 +830,7 @@ void Application::HandleWakeWordDetectedEvent() {
 
         if (state == kDeviceStateListening) {
             protocol_->SendStartListening(GetDefaultListeningMode());
+            ResetTtsCaption();
             audio_service_.ResetDecoder();
             audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
             // Re-enable wake word detection as it was stopped by the detection itself
@@ -900,11 +952,64 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
+void Application::ResetTtsCaption() {
+    std::lock_guard<std::mutex> lock(tts_caption_mutex_);
+    pending_tts_captions_.clear();
+    current_tts_caption_.clear();
+    tts_caption_received_audio_ms_ = 0;
+    tts_caption_last_switch_ms_ = 0;
+}
+
+void Application::QueueTtsCaption(const std::string& text) {
+    if (text.empty()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(tts_caption_mutex_);
+        pending_tts_captions_.push_back(text);
+    }
+}
+
+void Application::NoteTtsAudioReceived(uint32_t duration_ms) {
+    std::string visible_text;
+    {
+        std::lock_guard<std::mutex> lock(tts_caption_mutex_);
+        if (duration_ms == 0) {
+            duration_ms = 1;
+        }
+        tts_caption_received_audio_ms_ += duration_ms;
+
+        if (pending_tts_captions_.empty()) {
+            return;
+        }
+
+        bool can_switch = current_tts_caption_.empty();
+        if (!can_switch) {
+            const uint32_t current_duration_ms = EstimateTtsCaptionDurationMs(current_tts_caption_);
+            can_switch = tts_caption_received_audio_ms_ - tts_caption_last_switch_ms_ >= current_duration_ms;
+        }
+
+        if (!can_switch) {
+            return;
+        }
+
+        current_tts_caption_ = std::move(pending_tts_captions_.front());
+        pending_tts_captions_.pop_front();
+        tts_caption_last_switch_ms_ = tts_caption_received_audio_ms_;
+        visible_text = current_tts_caption_;
+    }
+
+    Schedule([message = std::move(visible_text)]() {
+        Board::GetInstance().GetDisplay()->SetChatMessage("assistant", message.c_str());
+    });
+}
+
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
     tts_audio_active_ = false;
     tts_stop_received_ = false;
+    ResetTtsCaption();
     audio_service_.ResetDecoder();
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
@@ -1052,6 +1157,24 @@ void Application::SendMcpMessage(const std::string& payload) {
     });
 }
 
+void Application::SendDeviceEvent(const std::string& event, const std::string& instruction) {
+    Schedule([this, event, instruction]() {
+        if (!protocol_) {
+            ESP_LOGW(TAG, "Skip device event, protocol is not initialized: %s", event.c_str());
+            return;
+        }
+
+        EnsureAudioChannelOpen();
+        if (!protocol_->IsAudioChannelOpened()) {
+            ESP_LOGW(TAG, "Skip device event, audio channel is not opened: %s", event.c_str());
+            return;
+        }
+
+        ESP_LOGI(TAG, "Send device event: %s, text: %s", event.c_str(), instruction.c_str());
+        protocol_->SendDeviceEvent(event, instruction);
+    });
+}
+
 void Application::SetAecMode(AecMode mode) {
     aec_mode_ = mode;
     Schedule([this]() {
@@ -1093,4 +1216,3 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
-
