@@ -60,7 +60,7 @@ int CompanionHttpControl::PostRpc(const std::string& method,
     http->SetHeader("Content-Type", "application/json");
     std::string auth = "Bearer " + bearer_token_;
     http->SetHeader("Authorization", auth.c_str());
-    http->SetContent(body_json);
+    http->SetContent(std::string(body_json));
 
     ESP_LOGI(TAG, "POST %s", url.c_str());
     if (!http->Open("POST", url)) {

@@ -66,6 +66,15 @@ private:
         }
     }
 
+    bool HasI2cDevice(uint8_t addr) {
+        esp_err_t ret = i2c_master_probe(display_i2c_bus_, addr, pdMS_TO_TICKS(100));
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Optional I2C device 0x%02X not found: %s", addr, esp_err_to_name(ret));
+            return false;
+        }
+        return true;
+    }
+
     void InitializeOledDisplay() {
         esp_lcd_panel_io_i2c_config_t io_config = {
             .dev_addr = 0x3C,
@@ -169,6 +178,11 @@ private:
     }
 
     void InitializeBmi270() {
+        if (!HasI2cDevice(IMU_BMI270_ADDR)) {
+            ESP_LOGW(TAG, "BMI270 not present; shake detection disabled");
+            return;
+        }
+
         bmi270_ = new BMI270(display_i2c_bus_, IMU_BMI270_ADDR);
         if (bmi270_->Init()) {
             bmi270_->OnShake([]() {

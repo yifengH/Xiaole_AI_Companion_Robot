@@ -1,9 +1,11 @@
 #include "device_identity.h"
 
 #include <esp_log.h>
+#include <esp_random.h>
 #include <sdkconfig.h>
 
 #include "settings.h"
+#include "system_info.h"
 
 #define TAG "DeviceIdentity"
 
@@ -23,10 +25,46 @@ constexpr char kOrgIdKey[] = "orgId";
 constexpr char kSnKey[] = "sn";
 constexpr char kSecretKey[] = "secret";
 
+std::string StripMacSeparators(std::string value) {
+    std::string result;
+    result.reserve(value.size());
+    for (char ch : value) {
+        if (ch != ':') {
+            result.push_back(ch);
+        }
+    }
+    return result;
+}
+
+std::string RandomHex(size_t bytes) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(bytes * 2);
+    for (size_t i = 0; i < bytes; ++i) {
+        uint8_t value = static_cast<uint8_t>(esp_random() & 0xff);
+        result.push_back(kHex[value >> 4]);
+        result.push_back(kHex[value & 0x0f]);
+    }
+    return result;
+}
+
 // LoadFactory 只读 NVS 里的出厂值(不生成)。无值返回空串。
 std::string LoadFactory(const char* key) {
     Settings settings(kIdentityNamespace, true);
     return settings.GetString(key);
+}
+
+std::string LoadOrStoreFactory(const char* key, const std::string& fallback) {
+    std::string value = LoadFactory(key);
+    if (!value.empty() || fallback.empty()) {
+        return value;
+    }
+
+    Settings settings(kIdentityNamespace, true);
+    settings.SetString(key, fallback);
+    ESP_LOGW(TAG, "Provisioned development identity %s=%s in NVS(%s)",
+             key, fallback.c_str(), kIdentityNamespace);
+    return fallback;
 }
 
 } // namespace
@@ -38,7 +76,7 @@ bool DeviceIdentity::IsProvisioned() {
 const std::string& DeviceIdentity::GetOrgId() {
     static std::string org_id;
     if (org_id.empty()) {
-        org_id = LoadFactory(kOrgIdKey);
+        org_id = LoadOrStoreFactory(kOrgIdKey, CONFIG_DEVICE_FACTORY_ORG_ID);
         if (!org_id.empty()) {
             ESP_LOGI(TAG, "Org Id: %s", org_id.c_str());
         } else {
@@ -52,7 +90,8 @@ const std::string& DeviceIdentity::GetOrgId() {
 const std::string& DeviceIdentity::GetSerialNumber() {
     static std::string sn;
     if (sn.empty()) {
-        sn = LoadFactory(kSnKey);
+        std::string fallback = std::string(CONFIG_LMCL_SN_PREFIX) + StripMacSeparators(SystemInfo::GetMacAddress());
+        sn = LoadOrStoreFactory(kSnKey, fallback);
         if (!sn.empty()) {
             ESP_LOGI(TAG, "Serial Number: %s", sn.c_str());
         } else {
@@ -66,7 +105,7 @@ const std::string& DeviceIdentity::GetSerialNumber() {
 const std::string& DeviceIdentity::GetSecret() {
     static std::string secret;
     if (secret.empty()) {
-        secret = LoadFactory(kSecretKey);
+        secret = LoadOrStoreFactory(kSecretKey, RandomHex(32));
         if (secret.empty()) {
             ESP_LOGE(TAG, "Device NOT provisioned: factory secret missing in NVS(%s/%s)",
                      kIdentityNamespace, kSecretKey);

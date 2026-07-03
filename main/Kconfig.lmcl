@@ -11,6 +11,14 @@ config DEVICE_BOOTSTRAP_URL
         response, then connect to the websocket endpoint with ?token=.
         This follows the self-hosted server device access contract.
 
+config DEVICE_FACTORY_ORG_ID
+    string "Development factory orgId"
+    default "858868370294965248"
+    help
+        Development fallback for devices without a factory-programmed NVS
+        identity/orgId. Production tooling should pre-program identity/orgId,
+        identity/sn, and identity/secret in NVS; NVS values take precedence.
+
 config DEVICE_FACTORY_SECRET
     string "Development factory secret (legacy)"
     default ""
