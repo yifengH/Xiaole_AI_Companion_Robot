@@ -111,6 +111,7 @@ public:
     bool UpgradeFirmware(const std::string& url, const std::string& package_hash = "", size_t package_size = 0, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
+    void SendDeviceEvent(const std::string& event, const std::string& instruction);
     void RegisterMcpBroadcastCallback(std::function<void(const std::string&)> callback);
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
@@ -142,15 +143,22 @@ private:
 
     bool network_ready_ = false;        // 网络是否就绪(常驻连接的前提)
     int last_reconnect_tick_ = -1000;   // 上次发起(重)连的 clock tick,用于退避
+    int reconnect_interval_ticks_ = 5;  // 当前重连退避间隔(秒);失败指数翻倍封顶 300,成功重置 5(Plan 6 D2:封禁/吊销不狂重连)
     std::function<void(const std::string&)> mcp_broadcast_callback_;
 
     bool has_server_time_ = false;
     bool aborted_ = false;
     bool tts_audio_active_ = false;
     bool tts_stop_received_ = false;
+    std::mutex tts_caption_mutex_;
+    std::deque<std::string> pending_tts_captions_;
+    std::string current_tts_caption_;
+    uint32_t tts_caption_received_audio_ms_ = 0;
+    uint32_t tts_caption_last_switch_ms_ = 0;
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
+    int last_activity_tick_ = 0;   // 上次会话活动的 clock tick(本地空闲判定用)
     TaskHandle_t activation_task_handle_ = nullptr;
 
 
@@ -175,6 +183,9 @@ private:
     void EnsureAudioChannelOpen();  // 常驻连接:确保 WSS 已连(未连则发起,成功后回到待唤醒)
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;
+    void ResetTtsCaption();
+    void QueueTtsCaption(const std::string& text);
+    void NoteTtsAudioReceived(uint32_t duration_ms);
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);

@@ -4,6 +4,20 @@
 
 #define TAG "Protocol"
 
+namespace {
+std::string JsonToString(cJSON* root) {
+    char* json = cJSON_PrintUnformatted(root);
+    if (json == nullptr) {
+        cJSON_Delete(root);
+        return "";
+    }
+    std::string result(json);
+    cJSON_free(json);
+    cJSON_Delete(root);
+    return result;
+}
+}
+
 void Protocol::OnIncomingJson(std::function<void(const cJSON* root)> callback) {
     on_incoming_json_ = callback;
 }
@@ -76,6 +90,20 @@ void Protocol::SendStopListening() {
 void Protocol::SendMcpMessage(const std::string& payload) {
     std::string message = "{\"session_id\":\"" + session_id_ + "\",\"type\":\"mcp\",\"payload\":" + payload + "}";
     SendText(message);
+}
+
+void Protocol::SendDeviceEvent(const std::string& event, const std::string& instruction) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
+    cJSON_AddStringToObject(root, "type", "deviceEvent");
+    cJSON* data = cJSON_CreateObject();
+    cJSON_AddStringToObject(data, "event", event.c_str());
+    cJSON_AddStringToObject(data, "source", "device");
+    cJSON_AddStringToObject(data, "text", instruction.c_str());
+    cJSON_AddStringToObject(data, "instruction", instruction.c_str());
+    cJSON_AddBoolToObject(data, "requestReply", true);
+    cJSON_AddItemToObject(root, "data", data);
+    SendText(JsonToString(root));
 }
 
 bool Protocol::IsTimeout() const {

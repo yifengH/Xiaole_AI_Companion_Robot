@@ -50,6 +50,10 @@
 #define DISPLAY_MIRROR_X true
 #define DISPLAY_MIRROR_Y true
 
+#define IMU_BMI270_ADDR_LOW  0x68
+#define IMU_BMI270_ADDR_HIGH 0x69
+#define IMU_BMI270_ADDR      IMU_BMI270_ADDR_HIGH
+
 #define LAMP_GPIO GPIO_NUM_NC
 
 #endif // _BOARD_CONFIG_H_

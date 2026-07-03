@@ -4,6 +4,7 @@
 #include "system_info.h"
 #include "audio_codec.h"
 #include "companion_protocol.h"
+#include "companion_http_control.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
 #include "companion_mcp_tools.h"
@@ -11,6 +12,7 @@
 #include "settings.h"
 #include "alarm_manager.h"
 
+#include <algorithm>
 #include <cstring>
 #include <cstdlib>
 #include <esp_log.h>
@@ -21,6 +23,35 @@
 
 #define TAG "Application"
 
+namespace {
+bool IsUtf8ContinuationByte(unsigned char ch) {
+    return (ch & 0xC0) == 0x80;
+}
+
+size_t CountUtf8Characters(const std::string& text) {
+    size_t count = 0;
+    for (unsigned char ch : text) {
+        if (!IsUtf8ContinuationByte(ch)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+uint32_t EstimateTtsCaptionDurationMs(const std::string& text) {
+    const size_t char_count = CountUtf8Characters(text);
+    if (char_count == 0) {
+        return 1;
+    }
+    constexpr uint32_t kMsPerChar = 180;
+    constexpr uint32_t kMinDurationMs = 120;
+    constexpr uint32_t kMaxDurationMs = 4000;
+    uint64_t estimate = static_cast<uint64_t>(char_count) * kMsPerChar;
+    estimate = std::max<uint64_t>(estimate, kMinDurationMs);
+    estimate = std::min<uint64_t>(estimate, kMaxDurationMs);
+    return static_cast<uint32_t>(estimate);
+}
+}
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -235,6 +266,7 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_VAD_CHANGE) {
             if (GetDeviceState() == kDeviceStateListening) {
+                last_activity_tick_ = clock_ticks_;   // 用户语音活动,刷新空闲计时
                 auto led = Board::GetInstance().GetLed();
                 led->OnStateChanged();
             }
@@ -251,6 +283,13 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_CLOCK_TICK) {
             clock_ticks_++;
+            // 本地会话空闲:仅在 Listening 态倒计时(Speaking 期助手在说、不计,故长回答不会误待机)。
+            // 静默满 kIdleStandbyTicks 秒 → 回待唤醒(Idle 转换内已做关麦 + 唤醒词侦听)。
+            constexpr int kIdleStandbyTicks = 30;
+            if (GetDeviceState() == kDeviceStateListening &&
+                clock_ticks_ - last_activity_tick_ >= kIdleStandbyTicks) {
+                SetDeviceState(kDeviceStateIdle);
+            }
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
 
@@ -261,19 +300,38 @@ void Application::Run() {
 
             // 常驻连接:网络就绪且处于待唤醒、尚未连上时,按退避节奏发起(重)连。
             // 开机首连与断线重连共用这一处。OpenAudioChannel 在主任务执行(配对等待期间会占用主循环)。
-            constexpr int kReconnectIntervalTicks = 5;   // 最快每 5s 试一次,避免连接风暴
+            // 退避间隔 = reconnect_interval_ticks_(失败指数翻倍封顶 300s;成功重置 5s),避免连接风暴/封禁狂重连。
             if (network_ready_ && protocol_ != nullptr && !protocol_->IsAudioChannelOpened() &&
                 GetDeviceState() == kDeviceStateIdle &&
-                clock_ticks_ - last_reconnect_tick_ >= kReconnectIntervalTicks) {
+                clock_ticks_ - last_reconnect_tick_ >= reconnect_interval_ticks_) {
                 last_reconnect_tick_ = clock_ticks_;
                 EnsureAudioChannelOpen();
             }
 
-            // 周期状态上报(常驻连接):每 ~10 分钟一次,供后台在线/型号归属/机群版本统计。
-            constexpr int kStatusReportIntervalTicks = 600;
-            if (clock_ticks_ % kStatusReportIntervalTicks == 0 &&
-                protocol_ != nullptr && protocol_->IsAudioChannelOpened()) {
-                protocol_->SendDeviceStatus();
+            // HTTP 控制面心跳(ReportDeviceStatus):周期 = Bootstrap 下发的 heartbeatSeconds(默认 60s)。
+            // 在线判定 = 最近一次心跳 < heartbeatSeconds×2.5。主循环空闲时持续跑;配对期主循环被
+            // OpenAudioChannel 占用,由其内的首跳心跳覆盖。令牌 401 → 断开 WSS 触发重连(重 Bootstrap 续令牌)。
+            if (CompanionHttpControl::GetInstance().configured() &&
+                (clock_ticks_ % std::max(1, CompanionHttpControl::GetInstance().heartbeat_seconds()) == 0)) {
+                if (!CompanionHttpControl::GetInstance().token_valid()) {
+                    ESP_LOGW(TAG, "Control-plane token expired (401) — reconnecting to re-Bootstrap");
+                    if (protocol_) { protocol_->CloseAudioChannel(); }
+                } else {
+                    CompanionHttpControl::GetInstance().ReportDeviceStatus();
+                }
+            }
+            // OTA 周期检测(开机后主循环跑到 + 每 ~10 分钟):hasUpdate 则刷写(复用现有 CompanionOta)。
+            // 触发源从旧 WSS update 帧改为 HTTP CheckFirmwareUpdate(下载/校验/刷写逻辑不变)。
+            constexpr int kOtaCheckIntervalTicks = 600;
+            if (clock_ticks_ > 0 && (clock_ticks_ % kOtaCheckIntervalTicks == 0) &&
+                CompanionHttpControl::GetInstance().configured() &&
+                CompanionHttpControl::GetInstance().token_valid()) {
+                Schedule([this]() {
+                    CompanionHttpControl::UpdateInfo upd;
+                    if (CompanionHttpControl::GetInstance().CheckFirmwareUpdate(upd) && upd.has_update) {
+                        UpgradeFirmware(upd.package_url, upd.package_hash, upd.package_size, upd.version);
+                    }
+                });
             }
         }
     }
@@ -427,10 +485,12 @@ void Application::EnsureAudioChannelOpen() {
     }
     SetDeviceState(kDeviceStateConnecting);
     if (protocol_->OpenAudioChannel()) {
-        // 已就绪(已绑定→收到 hello;或配对完成):回到待唤醒。语音由唤醒词触发。
+        // 已就绪(已绑定→收到 ready):回到待唤醒。语音由唤醒词触发。重置退避。
+        reconnect_interval_ticks_ = 5;
         SetDeviceState(kDeviceStateIdle);
     } else {
-        // 连接/配对失败:回到 Idle,等下次退避后由 clock tick 重试。
+        // 连接/配对失败(含被封禁/吊销/未预登记):指数退避,避免狂重连(封禁设备也只每 ~5min 试一次)。
+        reconnect_interval_ticks_ = std::min(300, reconnect_interval_ticks_ * 2);
         SetDeviceState(kDeviceStateIdle);
     }
 }
@@ -442,7 +502,7 @@ void Application::InitializeProtocol() {
 
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
-    // 唯一接入方式:WSS + Bootstrap(见 docs/device-access.md)。不再有 MQTT/双协议选择。
+    // 唯一接入方式:HTTP Bootstrap + /agent/v1 WSS(契约见 backend proto/companion_device + proto/agent_realtime)。不再有 MQTT/双协议选择。
     protocol_ = std::make_unique<CompanionProtocol>();
 
     protocol_->OnConnected([this]() {
@@ -466,8 +526,11 @@ void Application::InitializeProtocol() {
                 }
             });
         }
+        const uint32_t packet_duration_ms = packet->frame_duration > 0 ? packet->frame_duration : OPUS_FRAME_DURATION_MS;
         if (!audio_service_.PushPacketToDecodeQueue(std::move(packet), false)) {
             ESP_LOGW(TAG, "Failed to queue incoming audio packet");
+        } else {
+            NoteTtsAudioReceived(packet_duration_ms);
         }
     });
     
@@ -477,6 +540,18 @@ void Application::InitializeProtocol() {
             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
                 protocol_->server_sample_rate(), codec->output_sample_rate());
         }
+        // 通道打开后顺带查一次 OTA(开机/重连后即查;之后主循环每 ~10min 周期查)。触发源为 HTTP
+        // CheckFirmwareUpdate(旧链路是 WSS checkUpdate/update 帧,已移除)。
+        Schedule([this]() {
+            if (!CompanionHttpControl::GetInstance().configured() ||
+                !CompanionHttpControl::GetInstance().token_valid()) {
+                return;
+            }
+            CompanionHttpControl::UpdateInfo upd;
+            if (CompanionHttpControl::GetInstance().CheckFirmwareUpdate(upd) && upd.has_update) {
+                UpgradeFirmware(upd.package_url, upd.package_hash, upd.package_size, upd.version);
+            }
+        });
     });
     
     protocol_->OnAudioChannelClosed([this, &board]() {
@@ -484,6 +559,7 @@ void Application::InitializeProtocol() {
         aborted_ = true;
         tts_audio_active_ = false;
         tts_stop_received_ = false;
+        ResetTtsCaption();
         audio_service_.ResetDecoder();
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
@@ -501,6 +577,30 @@ void Application::InitializeProtocol() {
             ESP_LOGW(TAG, "Incoming message missing type");
             return;
         }
+        auto handle_tts_start = [this]() {
+            ResetTtsCaption();
+            audio_service_.ResetDecoder();
+            aborted_ = false;
+            tts_audio_active_ = true;
+            tts_stop_received_ = false;
+            Schedule([this]() {
+                aborted_ = false;
+                SetDeviceState(kDeviceStateSpeaking);
+            });
+        };
+        auto handle_tts_stop = [this]() {
+            tts_audio_active_ = false;
+            tts_stop_received_ = true;
+            Schedule([this]() {
+                if (GetDeviceState() == kDeviceStateSpeaking) {
+                    if (listening_mode_ == kListeningModeManualStop) {
+                        SetDeviceState(kDeviceStateIdle);
+                    } else {
+                        SetDeviceState(kDeviceStateListening);
+                    }
+                }
+            });
+        };
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(body, "state");
             if (!cJSON_IsString(state)) {
@@ -508,40 +608,33 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
-                audio_service_.ResetDecoder();
-                aborted_ = false;
-                tts_audio_active_ = true;
-                tts_stop_received_ = false;
-                Schedule([this]() {
-                    aborted_ = false;
-                    SetDeviceState(kDeviceStateSpeaking);
-                });
+                handle_tts_start();
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                tts_audio_active_ = false;
-                tts_stop_received_ = true;
-                Schedule([this]() {
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
-                    }
-                });
+                handle_tts_stop();
             } else if (strcmp(state->valuestring, "sentence") == 0) {
                 auto text = cJSON_GetObjectItem(body, "text");
                 if (cJSON_IsString(text)) {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    Schedule([display, message = std::string(text->valuestring)]() {
-                        display->SetChatMessage("assistant", message.c_str());
-                    });
+                    QueueTtsCaption(text->valuestring);
                 }
             }
+        } else if (strcmp(type->valuestring, "audioStart") == 0 || strcmp(type->valuestring, "turnStart") == 0) {
+            handle_tts_start();
+        } else if (strcmp(type->valuestring, "audioEnd") == 0 || strcmp(type->valuestring, "turnEnd") == 0) {
+            handle_tts_stop();
+        } else if (strcmp(type->valuestring, "subtitle") == 0) {
+            auto text = cJSON_GetObjectItem(body, "text");
+            if (cJSON_IsString(text)) {
+                ESP_LOGI(TAG, "<< %s", text->valuestring);
+                QueueTtsCaption(text->valuestring);
+            }
         } else if (strcmp(type->valuestring, "stt") == 0) {
+            last_activity_tick_ = clock_ticks_;   // 用户被识别发言,刷新空闲计时
             if (tts_audio_active_ || GetDeviceState() == kDeviceStateSpeaking) {
                 aborted_ = true;
                 tts_audio_active_ = false;
                 tts_stop_received_ = false;
+                ResetTtsCaption();
                 audio_service_.ResetDecoder();
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
@@ -562,38 +655,6 @@ void Application::InitializeProtocol() {
             if (cJSON_IsObject(payload)) {
                 McpServer::GetInstance().ParseMessage(payload);
             }
-        } else if (strcmp(type->valuestring, "sleep") == 0) {
-            // 服务端让设备回到待唤醒(对话识别到要离开 / 空闲 ~30s):退出 active、停上行。无 data。
-            // 「停上行」由 Idle 状态转换内的 EnableVoiceProcessing(false) 自动完成;不回发 listen/abort。
-            aborted_ = true;
-            tts_audio_active_ = false;
-            tts_stop_received_ = false;
-            audio_service_.ResetDecoder();
-            Schedule([this]() {
-                auto s = GetDeviceState();
-                if (s == kDeviceStateListening || s == kDeviceStateSpeaking) {
-                    SetDeviceState(kDeviceStateIdle);
-                }
-            });
-        } else if (strcmp(type->valuestring, "update") == 0) {
-            auto has_update = cJSON_GetObjectItem(body, "hasUpdate");
-            if (cJSON_IsBool(has_update) && cJSON_IsTrue(has_update)) {
-                auto url = cJSON_GetObjectItem(body, "packageUrl");
-                auto hash = cJSON_GetObjectItem(body, "packageHash");
-                auto size = cJSON_GetObjectItem(body, "packageSize");  // int64 → JSON 字符串
-                auto version = cJSON_GetObjectItem(body, "version");
-                if (cJSON_IsString(url)) {
-                    std::string package_url = url->valuestring;
-                    std::string package_hash = cJSON_IsString(hash) ? hash->valuestring : "";
-                    size_t package_size = cJSON_IsString(size) ? (size_t)strtoull(size->valuestring, nullptr, 10) : 0;
-                    std::string package_version = cJSON_IsString(version) ? version->valuestring : "";
-                    Schedule([this, package_url, package_hash, package_size, package_version]() {
-                        UpgradeFirmware(package_url, package_hash, package_size, package_version);
-                    });
-                } else {
-                    ESP_LOGW(TAG, "Update message missing packageUrl");
-                }
-            }
         } else if (strcmp(type->valuestring, "error") == 0) {
             // 服务端某阶段(llm/tts)出错,联调用:记录日志,不改变会话状态。
             auto stage = cJSON_GetObjectItem(body, "stage");
@@ -601,8 +662,6 @@ void Application::InitializeProtocol() {
             ESP_LOGW(TAG, "Server error [stage=%s]: %s",
                 cJSON_IsString(stage) ? stage->valuestring : "?",
                 cJSON_IsString(message) ? message->valuestring : "");
-        } else if (strcmp(type->valuestring, "pairingCode") == 0 || strcmp(type->valuestring, "bound") == 0) {
-            // Handled by CompanionProtocol so OpenAudioChannel can keep waiting for hello.
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
@@ -779,6 +838,7 @@ void Application::HandleWakeWordDetectedEvent() {
 
         if (state == kDeviceStateListening) {
             protocol_->SendStartListening(GetDefaultListeningMode());
+            ResetTtsCaption();
             audio_service_.ResetDecoder();
             audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
             // Re-enable wake word detection as it was stopped by the detection itself
@@ -843,6 +903,7 @@ void Application::HandleStateChangedEvent() {
             display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
+            last_activity_tick_ = clock_ticks_;   // 进入监听:从此刻起计本地空闲
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
@@ -900,11 +961,64 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
+void Application::ResetTtsCaption() {
+    std::lock_guard<std::mutex> lock(tts_caption_mutex_);
+    pending_tts_captions_.clear();
+    current_tts_caption_.clear();
+    tts_caption_received_audio_ms_ = 0;
+    tts_caption_last_switch_ms_ = 0;
+}
+
+void Application::QueueTtsCaption(const std::string& text) {
+    if (text.empty()) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(tts_caption_mutex_);
+        pending_tts_captions_.push_back(text);
+    }
+}
+
+void Application::NoteTtsAudioReceived(uint32_t duration_ms) {
+    std::string visible_text;
+    {
+        std::lock_guard<std::mutex> lock(tts_caption_mutex_);
+        if (duration_ms == 0) {
+            duration_ms = 1;
+        }
+        tts_caption_received_audio_ms_ += duration_ms;
+
+        if (pending_tts_captions_.empty()) {
+            return;
+        }
+
+        bool can_switch = current_tts_caption_.empty();
+        if (!can_switch) {
+            const uint32_t current_duration_ms = EstimateTtsCaptionDurationMs(current_tts_caption_);
+            can_switch = tts_caption_received_audio_ms_ - tts_caption_last_switch_ms_ >= current_duration_ms;
+        }
+
+        if (!can_switch) {
+            return;
+        }
+
+        current_tts_caption_ = std::move(pending_tts_captions_.front());
+        pending_tts_captions_.pop_front();
+        tts_caption_last_switch_ms_ = tts_caption_received_audio_ms_;
+        visible_text = current_tts_caption_;
+    }
+
+    Schedule([message = std::move(visible_text)]() {
+        Board::GetInstance().GetDisplay()->SetChatMessage("assistant", message.c_str());
+    });
+}
+
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
     tts_audio_active_ = false;
     tts_stop_received_ = false;
+    ResetTtsCaption();
     audio_service_.ResetDecoder();
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
@@ -1052,6 +1166,24 @@ void Application::SendMcpMessage(const std::string& payload) {
     });
 }
 
+void Application::SendDeviceEvent(const std::string& event, const std::string& instruction) {
+    Schedule([this, event, instruction]() {
+        if (!protocol_) {
+            ESP_LOGW(TAG, "Skip device event, protocol is not initialized: %s", event.c_str());
+            return;
+        }
+
+        EnsureAudioChannelOpen();
+        if (!protocol_->IsAudioChannelOpened()) {
+            ESP_LOGW(TAG, "Skip device event, audio channel is not opened: %s", event.c_str());
+            return;
+        }
+
+        ESP_LOGI(TAG, "Send device event: %s, text: %s", event.c_str(), instruction.c_str());
+        protocol_->SendDeviceEvent(event, instruction);
+    });
+}
+
 void Application::SetAecMode(AecMode mode) {
     aec_mode_ = mode;
     Schedule([this]() {
@@ -1093,4 +1225,3 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
-

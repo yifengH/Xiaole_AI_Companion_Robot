@@ -12,6 +12,7 @@
 #include "power_manager.h"
 #include "power_save_timer.h"
 #include "mcp_server.h"
+#include "sensors/bmi270.h"
 
 #define TAG "YunliaoS3"
 
@@ -214,6 +215,15 @@ class YunliaoS3 : public DualNetworkBoard {
         power_manager_->Start5V();
         power_manager_->Initialize();
         InitializeI2c();
+        // Initialize BMI270 sensor on the same I2C bus
+        {
+            BMI270* bmi = new BMI270(codec_i2c_bus_, 0x68);
+            if (bmi->Init()) {
+                bmi->Start();
+            } else {
+                ESP_LOGW(TAG, "BMI270 init failed");
+            }
+        }
         power_manager_->CheckStartup();
         InitializePowerSaveTimer();
         InitializeSpi();

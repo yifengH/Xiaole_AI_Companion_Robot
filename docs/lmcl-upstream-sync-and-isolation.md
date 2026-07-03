@@ -144,10 +144,11 @@ git merge upstream/main            # 这里产生合并"圆";有冲突就解(见
 
 | 文件 | 内容 |
 |---|---|
-| `protocols/companion_protocol.{h,cc}` | `CompanionProtocol`:Bootstrap+{type,data}帧+0x01音频+常驻连接+300s超时 |
-| `companion_ota.{h,cc}` | `CompanionOta`:WSS update 帧驱动的 sha256/size 校验刷写 |
+| `protocols/companion_protocol.{h,cc}` | `CompanionProtocol`:/agent/v1 实时面(Bootstrap→Configure HTTP 控制面→仅绑定后连 WS→等 ready;ready/stt/subtitle/audioStart/turnEnd/intent/error + 二进制 `[0x01][turnId低8][Opus]` 带 turnId 丢迟到帧;手停本地不发 abort;listen 仅 start;300s 超时) |
+| `protocols/companion_http_control.{h,cc}` | `CompanionHttpControl`(Plan 6 新增):HTTP 控制面客户端——GetPairingState 配对轮询 / ReportDeviceStatus 心跳 / CheckFirmwareUpdate OTA;Bearer 令牌 + 401→重 Bootstrap |
+| `companion_ota.{h,cc}` | `CompanionOta`:HTTP CheckFirmwareUpdate 驱动的 sha256/size 校验刷写(下载/校验逻辑不变,仅触发源由旧 WSS update 帧改为 HTTP) |
 | `companion_mcp_tools.{h,cc}` | 闹钟等设备能力 MCP 工具(外部 `AddTool` 注册) |
-| `device_identity.{h,cc}` | 设备 sn/secret(NVS 高熵随机,非 MAC 派生) |
+| `device_identity.{h,cc}` | 出厂预登记身份:读 NVS "identity" 出厂 sn/secret(Plan 6:不再首启 esp_random 自生成);未配置 → IsProvisioned()=false,不 Bootstrap |
 | `alarm_manager.{h,cc}` | 闹钟管理 |
 | `boards/lmcl-box-v1/*` | 我方板:屏/引脚/继电器/LED/DFPlayer |
 | `Kconfig.lmcl` | 我方追加配置(DEVICE_*/LMCL_*/Alarm),projbuild 仅一行 rsource |
@@ -160,14 +161,14 @@ git merge upstream/main            # 这里产生合并"圆";有冲突就解(见
 
 | 文件 | 我方改动 | 为何不抽 |
 |---|---|---|
-| `application.cc/.h` | 帧分发(tts/stt/sleep/update/error/pairingCode)、常驻连接重连、状态上报、唤醒流 | 这**就是**我们的应用主逻辑,非"可外置能力";上游 application 是骨架,我们的业务必然在此 |
+| `application.cc/.h` | 帧分发(tts/audioStart/turnEnd/subtitle/stt/intent/error;turnId 在协议层处理)、HTTP 心跳+OTA 定时器(取代旧 WSS status/checkUpdate/update 帧)、常驻连接重连+指数退避(封禁不狂重连)、唤醒流 | 这**就是**我们的应用主逻辑,非"可外置能力";上游 application 是骨架,我们的业务必然在此 |
 | `audio/audio_service.{cc,h}` | `OPUS_FRAME_DURATION_MS 60→20`(20ms 帧契约)、队列加大、ducking/逐包增益、PlaySound 扩参 | 修改上游音频管线内部,非新增;时序敏感 |
 | `audio/codecs/no_audio_codec.{cc,h}` | 设备端 AEC 软件参考(Write/Read 改造、output_buffer/slice/ref_mutex) | 改 codec 读写内部,**声学关键**,改错=回声消除失效,只能上机验 |
 | `audio/processors/afe_audio_processor.cc`、`wake_words/afe_wake_word.cc` | 各 1~2 行 | 极小,抽离不值 |
 | `display/{display,lcd_display,oled_display}.{cc,h}`、`lvgl_display/lvgl_display.{cc,h}` | 闹钟全屏覆盖层 + 状态栏闹钟图标 | 嵌进 LvglDisplay 构造/析构/UpdateStatusBar **生命周期**;独立成类需插继承链,风险高 |
 | `Kconfig.projbuild` | 板子选项条目 + LCD depends 加我方板 + rsource 钩子;`USE_DEVICE_AEC` 改 default y/去白名单 + 新增 `USE_REALTIME_CHAT` | 选项条目/depends 必须在上游 choice 内;AEC 收敛涉及 `USE_AUDIO_PROCESSOR` 依赖子交互,无硬件不敢动 |
 | `protocol.h` | 2 处:AudioStreamPacket 的 ducking/gain 字段、空默认虚函数 `SendDeviceStatus()` | 已是最小 hook(+7 行) |
-| `CMakeLists.txt` | SOURCES 换我方文件 + lmcl-box-v1 板分支 | 构建清单,必然差异 |
+| `CMakeLists.txt` | SOURCES 换我方文件(companion_protocol/companion_http_control/device_identity/companion_ota 等)+ lmcl-box-v1 板分支 | 构建清单,必然差异 |
 
 > **后续可选深抽**(需硬件在手再做,否则不划算):① `no_audio_codec` 的设备 AEC 改造做成 `boards/lmcl-box-v1/` 私有 codec 子类,还原共享 codec;② 显示闹钟覆盖层用「LvglDisplay 持有一个 AlarmOverlay 组合对象」抽出;③ `USE_DEVICE_AEC` 还原上游白名单结构 + 把 `BOARD_TYPE_LMCL_BOX_V1` 加进去 + `default y if` 我方板。**三项都需上机验证 AEC/显示,当前阶段刻意不做。**
 
