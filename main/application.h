@@ -143,6 +143,7 @@ private:
 
     bool network_ready_ = false;        // 网络是否就绪(常驻连接的前提)
     int last_reconnect_tick_ = -1000;   // 上次发起(重)连的 clock tick,用于退避
+    int reconnect_interval_ticks_ = 5;  // 当前重连退避间隔(秒);失败指数翻倍封顶 300,成功重置 5(Plan 6 D2:封禁/吊销不狂重连)
     std::function<void(const std::string&)> mcp_broadcast_callback_;
 
     bool has_server_time_ = false;
@@ -157,6 +158,7 @@ private:
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
+    int last_activity_tick_ = 0;   // 上次会话活动的 clock tick(本地空闲判定用)
     TaskHandle_t activation_task_handle_ = nullptr;
 
 

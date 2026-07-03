@@ -1,4 +1,5 @@
 #include "companion_protocol.h"
+#include "companion_http_control.h"
 #include "board.h"
 #include "system_info.h"
 #include "application.h"
@@ -7,9 +8,12 @@
 #include "display.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <cJSON.h>
 #include <esp_log.h>
 #include <esp_app_desc.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "assets/lang_config.h"
 
 #define TAG "Companion"
@@ -62,9 +66,19 @@ std::string AppendTokenToUrl(const std::string& url, const std::string& token) {
     return result;
 }
 
-const cJSON* MessageDataOrRoot(const cJSON* root) {
-    auto data = cJSON_GetObjectItem(root, "data");
-    return cJSON_IsObject(data) ? data : root;
+// StripLastPathSegment 去掉 URL 末尾路径段(.../CompanionDeviceService/Bootstrap → .../CompanionDeviceService)。
+// 用于从 Bootstrap 地址推导 HTTP 控制面 base(同 host + /grpc-gateway/CompanionDeviceService)。
+std::string StripLastPathSegment(const std::string& url) {
+    size_t qpos = url.find('?');
+    std::string path = (qpos == std::string::npos) ? url : url.substr(0, qpos);
+    while (!path.empty() && path.back() == '/') {
+        path.pop_back();  // 去尾部斜杠
+    }
+    size_t pos = path.find_last_of('/');
+    if (pos == std::string::npos || pos == 0) {
+        return path;  // 异常(无段可去):原样返回,调用方拼出的 URL 会失败但不崩。
+    }
+    return path.substr(0, pos);
 }
 }
 
@@ -77,7 +91,11 @@ bool CompanionProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     if (websocket_ == nullptr || !websocket_->IsConnected()) {
         return false;
     }
-    // 契约二进制帧:首字节 0x01 = Opus 音频,其后是裸 Opus 包(无版本号/时间戳/长度头)。
+    if (!voice_enabled_) {
+        return true;  // 服务端禁语音:静默吞掉(视为已消费),不上行服务端不会消费的音频
+    }
+    // 上行二进制帧:首字节 0x01 = Opus,其后是裸 Opus 包(无 turnId / 版本号 / 长度头)。
+    // (下行才带 turnId 低 8 位;上行设备不知 turnId,只发 [0x01][Opus]。)
     std::string serialized;
     serialized.resize(1 + packet->payload.size());
     serialized[0] = 0x01;
@@ -121,37 +139,57 @@ void CompanionProtocol::CloseAudioChannel(bool send_goodbye) {
 
 bool CompanionProtocol::OpenAudioChannel() {
     error_occurred_ = false;
-    saw_pairing_code_ = false;
-    xEventGroupClearBits(event_group_handle_, COMPANION_PROTOCOL_SERVER_HELLO_EVENT);
+    turn_known_ = false;
+    current_turn_low8_ = 0;
+    voice_enabled_ = true;  // 每次重连重置,以新会话 ready.voiceEnabled 为准
+    xEventGroupClearBits(event_group_handle_, COMPANION_PROTOCOL_SERVER_READY_EVENT);
 
-    // 每次连接前都先 Bootstrap 换取新短时令牌 + 下发的 WSS 地址(契约:开机/重连第一件事)。
+    // Plan 6 A:出厂预登记身份前置。未配置(无出厂 sn/secret)不连服务器,屏显提示。
+    if (!DeviceIdentity::IsProvisioned()) {
+        ESP_LOGE(TAG, "Device NOT provisioned — refusing to Bootstrap");
+        SetError("设备未出厂配置,请联系产线");
+        return false;
+    }
+
+    // 1. Bootstrap:换令牌 + 下发 /agent/v1 地址 + 心跳周期;同时 Configure HTTP 控制面。
     std::string url;
     if (!Bootstrap(url)) {
         return false;
     }
 
+    // 首跳心跳:立即上报一次(设备上线 + 型号归属);配对期间主循环被 WaitForBound 占用,由它维持在线新鲜度。
+    CompanionHttpControl::GetInstance().ReportDeviceStatus();
+
+    // 2. /agent/v1 仅绑定后准入:未绑定先 HTTP GetPairingState 轮询直到 phase=BOUND(屏显配对码)。
+    if (!WaitForBound()) {
+        return false;
+    }
+
+    // 3. 连 /agent/v1 WSS(令牌已由 Bootstrap 拼进 url 的 ?token=)。
     auto network = Board::GetInstance().GetNetwork();
     websocket_ = network->CreateWebSocket(1);
     if (websocket_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create websocket");
         return false;
     }
-    // 鉴权只有一种:令牌已由 Bootstrap 拼进 url 的 ?token=。不发任何额外 HTTP 头。
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
         if (binary) {
-            // 契约二进制帧:首字节是类型。0x01 = 下行 Opus 音频,其后为裸 Opus 包。
-            if (on_incoming_audio_ != nullptr && len > 1 && static_cast<uint8_t>(data[0]) == 0x01) {
+            // 下行二进制帧:[0x01][turnId 低8位][Opus 24k]。turnId 低8位 != 当前轮 → 丢弃(作废轮迟到音频)。
+            if (on_incoming_audio_ != nullptr && len > 2 && static_cast<uint8_t>(data[0]) == 0x01) {
+                uint8_t low8 = static_cast<uint8_t>(data[1]);
+                if (turn_known_ && low8 != current_turn_low8_) {
+                    return;  // 作废轮的迟到音频,丢
+                }
                 on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                     .sample_rate = server_sample_rate_,
                     .frame_duration = server_frame_duration_,
                     .timestamp = 0,
-                    .payload = std::vector<uint8_t>((uint8_t*)data + 1, (uint8_t*)data + len)
+                    .payload = std::vector<uint8_t>((uint8_t*)data + 2, (uint8_t*)data + len)
                 }));
             }
         } else {
-            // 文本帧:统一信封 {type, data}。hello/pairingCode/bound 在此就地处理(让 OpenAudioChannel 的
-            // 等 hello 循环能感知配对态),其余转交 application 的 OnIncomingJson。
+            // 文本帧:统一信封 {type, data}。ready 在此就地处理(采样率 + 开闸);其余转交 application。
             auto root = cJSON_ParseWithLength(data, len);
             if (root == nullptr) {
                 ESP_LOGW(TAG, "Invalid JSON frame: %s", std::string(data, len).c_str());
@@ -159,31 +197,12 @@ bool CompanionProtocol::OpenAudioChannel() {
             }
             auto type = cJSON_GetObjectItem(root, "type");
             if (cJSON_IsString(type)) {
-                if (strcmp(type->valuestring, "hello") == 0) {
-                    ParseServerHello(root);
-                } else if (strcmp(type->valuestring, "pairingCode") == 0) {
-                    saw_pairing_code_ = true;
-                    auto data_obj = MessageDataOrRoot(root);
-                    auto code = cJSON_GetObjectItem(data_obj, "code");
-                    auto ttl = cJSON_GetObjectItem(data_obj, "ttlSeconds");
-                    std::string message = "Pairing code: ";
-                    message += cJSON_IsString(code) ? code->valuestring : "(unknown)";
-                    // ttlSeconds 是 int64,protojson 编码为 JSON 字符串。
-                    if (cJSON_IsString(ttl)) {
-                        message += " / ";
-                        message += ttl->valuestring;
-                        message += "s";
-                    }
-                    Board::GetInstance().GetDisplay()->SetChatMessage("system", message.c_str());
-                    if (on_incoming_json_ != nullptr) {
-                        on_incoming_json_(root);
-                    }
-                } else if (strcmp(type->valuestring, "bound") == 0) {
-                    Board::GetInstance().GetDisplay()->SetChatMessage("system", "Device bound, waiting for voice service...");
-                    if (on_incoming_json_ != nullptr) {
-                        on_incoming_json_(root);
-                    }
+                auto data_obj = cJSON_GetObjectItem(root, "data");
+                UpdateCurrentTurn(data_obj);  // 全下行文本帧带 turnId → 更新当前轮(二进制据此丢迟到帧)
+                if (strcmp(type->valuestring, "ready") == 0) {
+                    ParseServerReady(root);
                 } else {
+                    // stt/subtitle/audioStart/turnEnd/intent/error 交 application 处理。
                     if (on_incoming_json_ != nullptr) {
                         on_incoming_json_(root);
                     }
@@ -203,39 +222,21 @@ bool CompanionProtocol::OpenAudioChannel() {
         }
     });
 
-    ESP_LOGI(TAG, "Connecting to websocket server: %s", url.c_str());
+    ESP_LOGI(TAG, "Connecting to /agent/v1: %s", url.c_str());
     if (!websocket_->Connect(url.c_str())) {
-        // 注:底层 WebSocket 组件未透出握手 HTTP 状态码(401/403/503),无法在此细分处理。
-        // 因每次连接前都重新 Bootstrap,令牌恒为新,401(令牌过期)已基本规避;403(未注册/封禁)/503
-        // 表现为连接失败,由上层退避重连兜底。如需按状态码区分,须先让该组件透出 GetStatusCode()。
-        ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
+        // 底层 WebSocket 组件未透出握手 HTTP 状态码(401/403/503);每次连接前已重 Bootstrap,令牌恒新。
+        // 被封禁/吊销会在握手被拒(连接失败)→ 上层退避重连(不狂连)。
+        ESP_LOGE(TAG, "Failed to connect to /agent/v1, code=%d", websocket_->GetLastError());
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
 
-    // 连上后:上报一次状态(供后台在线/型号归属)+ 检测固件更新。设备 hello 可选,不发。
-    SendText(GetStatusMessage());
-    SendText(GetCheckUpdateMessage());
-
-    // Wait for server hello
-    bool hello_received = false;
-    const int max_wait_seconds = 10 * 60;
-    for (int waited = 0; waited < max_wait_seconds; waited += 10) {
-        EventBits_t bits = xEventGroupWaitBits(event_group_handle_, COMPANION_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
-        if (bits & COMPANION_PROTOCOL_SERVER_HELLO_EVENT) {
-            hello_received = true;
-            break;
-        }
-        if (!saw_pairing_code_) {
-            ESP_LOGE(TAG, "Failed to receive server hello");
-            SetError(Lang::Strings::SERVER_TIMEOUT);
-            return false;
-        }
-        ESP_LOGI(TAG, "Waiting for device binding before server hello...");
-    }
-
-    if (!hello_received && saw_pairing_code_) {
-        ESP_LOGE(TAG, "Timed out waiting for device binding");
+    // 4. 等服务端 ready(语音就绪 + 下行采样率)。
+    constexpr int kReadyWaitSeconds = 30;
+    EventBits_t bits = xEventGroupWaitBits(event_group_handle_, COMPANION_PROTOCOL_SERVER_READY_EVENT,
+                                           pdTRUE, pdFALSE, pdMS_TO_TICKS(kReadyWaitSeconds * 1000));
+    if (!(bits & COMPANION_PROTOCOL_SERVER_READY_EVENT)) {
+        ESP_LOGE(TAG, "Timed out waiting for server ready");
         SetError(Lang::Strings::SERVER_TIMEOUT);
         return false;
     }
@@ -247,16 +248,9 @@ bool CompanionProtocol::OpenAudioChannel() {
     return true;
 }
 
-void CompanionProtocol::ParseServerHello(const cJSON* root) {
-    // 契约 hello.data:{ sessionId, audio:{ format, sampleRate } }(字段名一律 lowerCamelCase)。
-    auto data_obj = MessageDataOrRoot(root);
-
-    auto session_id = cJSON_GetObjectItem(data_obj, "sessionId");
-    if (cJSON_IsString(session_id)) {
-        session_id_ = session_id->valuestring;
-        ESP_LOGI(TAG, "Session ID: %s", session_id_.c_str());
-    }
-
+void CompanionProtocol::ParseServerReady(const cJSON* root) {
+    // ready.data:{audio:{format,sampleRate},voiceEnabled}。下行采样率以 audio.sampleRate 为准。
+    auto data_obj = cJSON_GetObjectItem(root, "data");
     auto audio = cJSON_GetObjectItem(data_obj, "audio");
     if (cJSON_IsObject(audio)) {
         auto sample_rate = cJSON_GetObjectItem(audio, "sampleRate");
@@ -264,28 +258,94 @@ void CompanionProtocol::ParseServerHello(const cJSON* root) {
             server_sample_rate_ = sample_rate->valueint;
         }
     }
+    // voiceEnabled=false:本会话语音面被服务端禁用 → 不发 listen、丢上行音频(见 SendStartListening/SendAudio)。
+    auto voice_enabled = cJSON_GetObjectItem(data_obj, "voiceEnabled");
+    voice_enabled_ = !cJSON_IsBool(voice_enabled) || cJSON_IsTrue(voice_enabled);
+    if (!voice_enabled_) {
+        ESP_LOGW(TAG, "Server ready with voiceEnabled=false — uplink audio suppressed for this session");
+    }
+    ESP_LOGI(TAG, "Server ready: sampleRate=%d, frameDuration=%d, voiceEnabled=%d",
+        server_sample_rate_, server_frame_duration_, voice_enabled_);
+    xEventGroupSetBits(event_group_handle_, COMPANION_PROTOCOL_SERVER_READY_EVENT);
+}
 
-    ESP_LOGI(TAG, "Server audio: sampleRate=%d, frameDuration=%d",
-        server_sample_rate_, server_frame_duration_);
+void CompanionProtocol::UpdateCurrentTurn(const cJSON* data_obj) {
+    if (!cJSON_IsObject(data_obj)) {
+        return;
+    }
+    auto turn_id = cJSON_GetObjectItem(data_obj, "turnId");
+    // turnId 是 int64,protojson 编码为 JSON 字符串;只需低 8 位区分「当前轮 vs 刚作废轮」。
+    if (cJSON_IsString(turn_id) && turn_id->valuestring != nullptr) {
+        long long id = strtoll(turn_id->valuestring, nullptr, 10);
+        current_turn_low8_ = static_cast<uint8_t>(id & 0xff);
+        turn_known_ = true;
+    }
+}
 
-    xEventGroupSetBits(event_group_handle_, COMPANION_PROTOCOL_SERVER_HELLO_EVENT);
+bool CompanionProtocol::WaitForBound() {
+    // /agent/v1 仅绑定后准入:未绑定时 HTTP 短轮询 GetPairingState,屏显配对码 + 倒计时,直到 phase=BOUND。
+    // (取代旧 WSS pairingCode/bound 帧 + NotifyDeviceBound 反向回调。)
+    auto display = Board::GetInstance().GetDisplay();
+    constexpr int kPollIntervalSec = 2;
+    constexpr int kMaxWaitSec = 10 * 60;
+    // 「真没绑,等人配对」才值得占满 10 分钟;「轮询本身连不上」(网络抖动/服务不可达)必须快速失败——
+    // 本函数在主事件循环里同步跑,耗在这儿按键/唤醒词/心跳全停摆;失败退出后由上层指数退避重连。
+    constexpr int kMaxConsecutiveFailures = 5;
+    int consecutive_failures = 0;
+    for (int waited = 0; waited < kMaxWaitSec; waited += kPollIntervalSec) {
+        // 令牌 401(GetPairingState 把 token_valid_ 置 false)→ 上层重 Bootstrap(重试整个 OpenAudioChannel)。
+        if (!CompanionHttpControl::GetInstance().token_valid()) {
+            ESP_LOGW(TAG, "Control-plane token invalid (401) — need re-Bootstrap");
+            return false;
+        }
+        CompanionHttpControl::PairingState st;
+        if (CompanionHttpControl::GetInstance().GetPairingState(st)) {
+            consecutive_failures = 0;
+            if (st.bound) {
+                ESP_LOGI(TAG, "Device bound — proceeding to /agent/v1");
+                display->SetChatMessage("system", "设备已绑定,连接语音服务...");
+                return true;
+            }
+            // PAIRING:屏显配对码 + 倒计时(码惰性轮转:轮询拿新码即更新显示)。
+            std::string msg = "配对码: ";
+            msg += st.pairing_code.empty() ? std::string("(等待)") : st.pairing_code;
+            if (st.ttl_seconds > 0) {
+                msg += " / " + std::to_string(st.ttl_seconds) + "s";
+            }
+            display->SetChatMessage("system", msg.c_str());
+        } else {
+            ESP_LOGW(TAG, "GetPairingState failed during pairing poll");
+            if (++consecutive_failures >= kMaxConsecutiveFailures) {
+                ESP_LOGE(TAG, "GetPairingState failed %d times in a row — bail out, let backoff reconnect", consecutive_failures);
+                SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+                return false;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(kPollIntervalSec * 1000));
+    }
+    ESP_LOGE(TAG, "Timed out waiting for device binding");
+    SetError(Lang::Strings::SERVER_TIMEOUT);
+    return false;
 }
 
 bool CompanionProtocol::Bootstrap(std::string& websocket_url) {
     Settings settings("websocket", false);
     std::string bootstrap_url = settings.GetString("bootstrap_url", CONFIG_DEVICE_BOOTSTRAP_URL);
-    std::string sn = settings.GetString("sn", DeviceIdentity::GetSerialNumber());
-    std::string secret = settings.GetString("secret", DeviceIdentity::GetSecret());
+    std::string sn = DeviceIdentity::GetSerialNumber();
+    std::string secret = DeviceIdentity::GetSecret();
 
     auto http = Board::GetInstance().GetNetwork()->CreateHttp(0);
     http->SetHeader("Content-Type", "application/json");
 
     cJSON* request = cJSON_CreateObject();
+    // orgId 是 int64(>2^53):必须以 JSON 字符串发送(protojson 约定;若发 number 会因 double 丢精度)。
+    cJSON_AddStringToObject(request, "orgId", DeviceIdentity::GetOrgId().c_str());
     cJSON_AddStringToObject(request, "sn", sn.c_str());
     cJSON_AddStringToObject(request, "secret", secret.c_str());
     http->SetContent(JsonToString(request));
 
-    ESP_LOGI(TAG, "Bootstrap: %s, sn=%s", bootstrap_url.c_str(), sn.c_str());
+    ESP_LOGI(TAG, "Bootstrap: %s, orgId=%s, sn=%s", bootstrap_url.c_str(),
+             DeviceIdentity::GetOrgId().c_str(), sn.c_str());
     if (!http->Open("POST", bootstrap_url)) {
         ESP_LOGE(TAG, "Failed to open bootstrap HTTP connection, code=0x%x", http->GetLastError());
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
@@ -308,71 +368,45 @@ bool CompanionProtocol::Bootstrap(std::string& websocket_url) {
         return false;
     }
 
+    bool ok = false;
     auto code = cJSON_GetObjectItem(root, "code");
     auto message = cJSON_GetObjectItem(root, "message");
     auto data = cJSON_GetObjectItem(root, "data");
-    if (!cJSON_IsNumber(code) || code->valueint != 0 || !cJSON_IsObject(data)) {
+    if (cJSON_IsNumber(code) && code->valueint == 0 && cJSON_IsObject(data)) {
+        auto token = cJSON_GetObjectItem(data, "deviceToken");
+        auto config = cJSON_GetObjectItem(data, "config");
+        auto endpoints = cJSON_IsObject(config) ? cJSON_GetObjectItem(config, "endpoints") : nullptr;
+        auto ws = cJSON_IsObject(endpoints) ? cJSON_GetObjectItem(endpoints, "websocket") : nullptr;
+        auto hb = cJSON_IsObject(config) ? cJSON_GetObjectItem(config, "heartbeatSeconds") : nullptr;
+        if (cJSON_IsString(token) && cJSON_IsString(ws)) {
+            websocket_url = AppendTokenToUrl(ws->valuestring, token->valuestring);
+            int heartbeat_seconds = cJSON_IsNumber(hb) ? hb->valueint : 60;
+            // Configure HTTP 控制面(配对轮询 / 心跳 / OTA):令牌 + 控制面 base(从 Bootstrap 地址推导)+ 心跳周期。
+            std::string control_base = StripLastPathSegment(bootstrap_url);
+            CompanionHttpControl::GetInstance().Configure(token->valuestring, control_base, heartbeat_seconds);
+            ESP_LOGI(TAG, "Bootstrap ok: agent ws=%s, heartbeat=%ds, control=%s",
+                     ws->valuestring, heartbeat_seconds, control_base.c_str());
+            ok = true;
+        } else {
+            ESP_LOGE(TAG, "Bootstrap response missing deviceToken or websocket");
+            SetError(Lang::Strings::SERVER_ERROR);
+        }
+    } else {
         ESP_LOGE(TAG, "Bootstrap rejected: %s", cJSON_IsString(message) ? message->valuestring : response.c_str());
-        cJSON_Delete(root);
         SetError(cJSON_IsString(message) ? message->valuestring : Lang::Strings::SERVER_ERROR);
-        return false;
     }
 
-    auto token = cJSON_GetObjectItem(data, "deviceToken");
-    auto config = cJSON_GetObjectItem(data, "config");
-    auto endpoints = cJSON_IsObject(config) ? cJSON_GetObjectItem(config, "endpoints") : nullptr;
-    auto ws = cJSON_IsObject(endpoints) ? cJSON_GetObjectItem(endpoints, "websocket") : nullptr;
-    if (!cJSON_IsString(token) || !cJSON_IsString(ws)) {
-        ESP_LOGE(TAG, "Bootstrap response missing deviceToken or websocket");
-        cJSON_Delete(root);
-        SetError(Lang::Strings::SERVER_ERROR);
-        return false;
-    }
-
-    websocket_url = AppendTokenToUrl(ws->valuestring, token->valuestring);
-    ESP_LOGI(TAG, "Bootstrap websocket endpoint: %s", ws->valuestring);
     cJSON_Delete(root);
-    return true;
-}
-
-std::string CompanionProtocol::GetStatusMessage() {
-    Settings settings("websocket", false);
-    auto app_desc = esp_app_get_description();
-    int battery_level = 0;
-    bool charging = false;
-    bool discharging = false;
-    bool has_battery = Board::GetInstance().GetBatteryLevel(battery_level, charging, discharging);
-
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "type", "status");
-    cJSON* data = cJSON_CreateObject();
-    cJSON_AddStringToObject(data, "firmwareVersion", app_desc->version);
-    cJSON_AddStringToObject(data, "deviceModelCode", settings.GetString("model", CONFIG_DEVICE_MODEL_CODE).c_str());
-    cJSON_AddNumberToObject(data, "powerSource", has_battery && discharging ? 1 : 2);
-    if (has_battery) {
-        cJSON_AddNumberToObject(data, "batteryLevel", battery_level);
-    }
-    cJSON* extra = cJSON_CreateObject();
-    cJSON_AddStringToObject(extra, "boardName", BOARD_NAME);
-    cJSON_AddStringToObject(extra, "mac", SystemInfo::GetMacAddress().c_str());
-    cJSON_AddItemToObject(data, "extra", extra);
-    cJSON_AddItemToObject(root, "data", data);
-    return JsonToString(root);
-}
-
-std::string CompanionProtocol::GetCheckUpdateMessage() {
-    auto app_desc = esp_app_get_description();
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "type", "checkUpdate");
-    cJSON* data = cJSON_CreateObject();
-    cJSON_AddStringToObject(data, "version", app_desc->version);
-    cJSON_AddItemToObject(root, "data", data);
-    return JsonToString(root);
+    return ok;
 }
 
 void CompanionProtocol::SendStartListening(ListeningMode mode) {
     // 契约 §4.1:listen 仅 {type:"listen",data:{state:"start"}}。mode 是端侧本地概念,不进 wire。
     (void)mode;
+    if (!voice_enabled_) {
+        ESP_LOGW(TAG, "voiceEnabled=false — skip listen frame (server-side voice disabled)");
+        return;
+    }
     cJSON* root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "type", "listen");
     cJSON* data = cJSON_CreateObject();
@@ -382,18 +416,10 @@ void CompanionProtocol::SendStartListening(ListeningMode mode) {
 }
 
 void CompanionProtocol::SendAbortSpeaking(AbortReason reason) {
-    // 契约 §6:语音/唤醒词插话打断**不发** abort(服务端自动取消旧轮,发了会误杀刚起的新轮);
-    // 只有用户「按键手动停止」(kAbortReasonNone)才发 {type:"abort"}(无 data)。
-    if (reason != kAbortReasonNone) {
-        return;
-    }
-    cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "type", "abort");
-    SendText(JsonToString(root));
-}
-
-void CompanionProtocol::SendDeviceStatus() {
-    SendText(GetStatusMessage());
+    // Plan 6 D7:手停纯本地(停渲染下行音频/字幕 + Abort 本地播放器),不发任何上行帧。
+    // 服务端靠限速下发 + 端侧 ~200ms 小缓冲自动收口 barge-in;上行 abort 反会误杀刚起的新轮。
+    // 本地停播由 Application::AbortSpeaking 完成(置 aborted_、ResetDecoder),不依赖本方法。
+    (void)reason;
 }
 
 void CompanionProtocol::SendDeviceEvent(const std::string& event, const std::string& instruction) {

@@ -12,12 +12,13 @@ config DEVICE_BOOTSTRAP_URL
         This follows the self-hosted server device access contract.
 
 config DEVICE_FACTORY_SECRET
-    string "Development factory secret"
+    string "Development factory secret (legacy)"
     default ""
     help
-        Development fallback for the device factory secret used by Bootstrap.
-        Production builds should store a per-device random secret in NVS key
-        websocket.secret instead of using a shared sdkconfig value.
+        Legacy development fallback. The firmware reads the per-device factory
+        secret from NVS namespace "identity" (key "secret") — see device_identity.cc
+        (出厂预登记,不再首启自生成). This Kconfig value is NOT read by the firmware
+        runtime; kept only for reference / manufacturing tooling.
 
 config DEVICE_MODEL_CODE
     string "Device Model Code (deviceModelCode)"
@@ -29,8 +30,8 @@ config LMCL_SN_PREFIX
     string "LMCL Serial Number prefix"
     default "lmcl-"
     help
-        Prefix used by the per-device random LMCL serial number
-        (生成于 device_identity:首启写入 NVS 的高熵随机串,非 MAC 派生)。
+        LMCL sn 前缀约定(如 "lmcl-")。产线工装生成出厂 (sn, secret) 烧入 NVS "identity"
+        时用此前缀。固件运行时**不读**它——device_identity 只读出厂预置 sn(不再首启自生成)。
 
 menu "Alarm Settings"
     config ALARM_RING_INTERVAL_SECONDS
