@@ -4,6 +4,7 @@
 #include <esp_timer.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 
 #define TAG "NoAudioCodec"

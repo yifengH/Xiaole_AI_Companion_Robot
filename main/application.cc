@@ -3,9 +3,10 @@
 #include "display.h"
 #include "system_info.h"
 #include "audio_codec.h"
-#include "websocket_protocol.h"
+#include "companion_protocol.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
+#include "companion_mcp_tools.h"
 #include "assets.h"
 #include "settings.h"
 #include "alarm_manager.h"
@@ -98,6 +99,8 @@ void Application::Initialize() {
     auto& mcp_server = McpServer::GetInstance();
     mcp_server.AddCommonTools();
     mcp_server.AddUserOnlyTools();
+    // 我方设备能力工具(闹钟等)外部注册,不焊进上游 mcp_server.cc。
+    AddCompanionMcpTools();
 
     // Set network event callback for UI updates and network state handling
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
@@ -341,7 +344,7 @@ void Application::HandleActivationDoneEvent() {
 
 void Application::ActivationTask() {
     // Create OTA object (仅用于标记当前固件有效 + 取版本号;升级走 WSS update 帧)
-    ota_ = std::make_unique<Ota>();
+    ota_ = std::make_unique<CompanionOta>();
 
     // Check for new assets version(设备内部资源分区,非接入协议)
     CheckAssetsVersion();
@@ -440,7 +443,7 @@ void Application::InitializeProtocol() {
     display->SetStatus(Lang::Strings::LOADING_PROTOCOL);
 
     // 唯一接入方式:WSS + Bootstrap(见 docs/device-access.md)。不再有 MQTT/双协议选择。
-    protocol_ = std::make_unique<WebsocketProtocol>();
+    protocol_ = std::make_unique<CompanionProtocol>();
 
     protocol_->OnConnected([this]() {
         DismissAlert();
@@ -599,7 +602,7 @@ void Application::InitializeProtocol() {
                 cJSON_IsString(stage) ? stage->valuestring : "?",
                 cJSON_IsString(message) ? message->valuestring : "");
         } else if (strcmp(type->valuestring, "pairingCode") == 0 || strcmp(type->valuestring, "bound") == 0) {
-            // Handled by WebsocketProtocol so OpenAudioChannel can keep waiting for hello.
+            // Handled by CompanionProtocol so OpenAudioChannel can keep waiting for hello.
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
@@ -684,6 +687,10 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     if (GetDeviceState() != kDeviceStateConnecting) {
         return;
     }
+
+    // Switch to performance mode before connecting to reduce latency
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
@@ -792,6 +799,10 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     if (GetDeviceState() != kDeviceStateConnecting) {
         return;
     }
+
+    // Switch to performance mode before connecting to reduce latency
+    auto& board = Board::GetInstance();
+    board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
 
     if (!protocol_->IsAudioChannelOpened()) {
         if (!protocol_->OpenAudioChannel()) {
@@ -948,7 +959,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& pac
     audio_service_.Stop();
     vTaskDelay(pdMS_TO_TICKS(1000));
 
-    bool upgrade_success = Ota::Upgrade(upgrade_url, package_hash, package_size, [this, display](int progress, size_t speed) {
+    bool upgrade_success = CompanionOta::Upgrade(upgrade_url, package_hash, package_size, [this, display](int progress, size_t speed) {
         char buffer[32];
         snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
         Schedule([display, message = std::string(buffer)]() {
@@ -1025,11 +1036,18 @@ bool Application::CanEnterSleepMode() {
     return true;
 }
 
+void Application::RegisterMcpBroadcastCallback(std::function<void(const std::string&)> callback) {
+    mcp_broadcast_callback_ = std::move(callback);
+}
+
 void Application::SendMcpMessage(const std::string& payload) {
     // Always schedule to run in main task for thread safety
-    Schedule([this, payload = std::move(payload)]() {
+    Schedule([this, payload](){ 
         if (protocol_) {
             protocol_->SendMcpMessage(payload);
+        }
+        if (mcp_broadcast_callback_) {
+            mcp_broadcast_callback_(payload);
         }
     });
 }
