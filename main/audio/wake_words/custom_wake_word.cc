@@ -2,6 +2,7 @@
 #include "audio_service.h"
 #include "system_info.h"
 #include "assets.h"
+#include "settings.h"
 
 #include <esp_log.h>
 #include <esp_mn_iface.h>
@@ -10,6 +11,10 @@
 #include <cJSON.h>
 
 #define TAG "CustomWakeWord"
+#define WAKE_WORD_SETTINGS_NS "wake_word"
+#define WAKE_WORD_SETTINGS_COMMAND "command"
+#define WAKE_WORD_SETTINGS_TEXT "text"
+#define WAKE_WORD_SETTINGS_THRESHOLD "threshold"
 
 CustomWakeWord::CustomWakeWord()
     : wake_word_pcm_(), wake_word_opus_() {
@@ -81,6 +86,54 @@ void CustomWakeWord::ParseWakenetModelConfig() {
     cJSON_Delete(root);
 }
 
+void CustomWakeWord::LoadPersistedConfig() {
+    Settings settings(WAKE_WORD_SETTINGS_NS, false);
+    auto command = settings.GetString(WAKE_WORD_SETTINGS_COMMAND);
+    auto text = settings.GetString(WAKE_WORD_SETTINGS_TEXT);
+    int threshold_percent = settings.GetInt(WAKE_WORD_SETTINGS_THRESHOLD, -1);
+    if (command.empty() || text.empty() || threshold_percent < 1 || threshold_percent > 99) {
+        return;
+    }
+
+    std::string error;
+    if (ApplyWakeWordConfigLocked(command, text, threshold_percent, error)) {
+        ESP_LOGI(TAG, "Loaded persisted custom wake word: command=%s, text=%s, threshold=%d",
+                 command.c_str(), text.c_str(), threshold_percent);
+    } else {
+        ESP_LOGW(TAG, "Ignore invalid persisted wake word config: %s", error.c_str());
+    }
+}
+
+bool CustomWakeWord::ApplyWakeWordConfigLocked(const std::string& command, const std::string& text,
+                                               int threshold_percent, std::string& error) {
+    if (command.empty()) {
+        error = "command is empty";
+        return false;
+    }
+    if (text.empty()) {
+        error = "text is empty";
+        return false;
+    }
+    if (threshold_percent < 1 || threshold_percent > 99) {
+        error = "threshold must be in range 1-99";
+        return false;
+    }
+
+    commands_.clear();
+    commands_.push_back({command, text, "wake"});
+    threshold_ = threshold_percent / 100.0f;
+
+    if (multinet_ != nullptr && multinet_model_data_ != nullptr) {
+        multinet_->set_det_threshold(multinet_model_data_, threshold_);
+        esp_mn_commands_clear();
+        esp_mn_commands_add(1, command.c_str());
+        esp_mn_commands_update();
+        multinet_->clean(multinet_model_data_);
+        multinet_->print_active_speech_commands(multinet_model_data_);
+    }
+
+    return true;
+}
 
 bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     codec_ = codec;
@@ -96,6 +149,10 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
     } else {
         models_ = models_list;
         ParseWakenetModelConfig();
+    }
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        LoadPersistedConfig();
     }
 
     if (models_ == nullptr || models_->num == -1) {
@@ -117,15 +174,68 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
 
     multinet_ = esp_mn_handle_from_name(mn_name_);
     multinet_model_data_ = multinet_->create(mn_name_, duration_);
-    multinet_->set_det_threshold(multinet_model_data_, threshold_);
-    esp_mn_commands_clear();
-    for (int i = 0; i < commands_.size(); i++) {
-        esp_mn_commands_add(i + 1, commands_[i].command.c_str());
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        multinet_->set_det_threshold(multinet_model_data_, threshold_);
+        esp_mn_commands_clear();
+        for (int i = 0; i < commands_.size(); i++) {
+            esp_mn_commands_add(i + 1, commands_[i].command.c_str());
+        }
     }
     esp_mn_commands_update();
     
     multinet_->print_active_speech_commands(multinet_model_data_);
     return true;
+}
+
+bool CustomWakeWord::ConfigureWakeWord(const std::string& command, const std::string& text,
+                                       int threshold_percent, bool persist, std::string& error) {
+    std::lock_guard<std::mutex> input_lock(input_buffer_mutex_);
+    std::lock_guard<std::mutex> config_lock(config_mutex_);
+    bool was_running = running_;
+    running_ = false;
+    input_buffer_.clear();
+
+    if (!ApplyWakeWordConfigLocked(command, text, threshold_percent, error)) {
+        running_ = was_running;
+        return false;
+    }
+
+    if (persist) {
+        Settings settings(WAKE_WORD_SETTINGS_NS, true);
+        settings.SetString(WAKE_WORD_SETTINGS_COMMAND, command);
+        settings.SetString(WAKE_WORD_SETTINGS_TEXT, text);
+        settings.SetInt(WAKE_WORD_SETTINGS_THRESHOLD, threshold_percent);
+    }
+
+    last_detected_wake_word_.clear();
+    running_ = was_running;
+    ESP_LOGI(TAG, "Custom wake word updated: command=%s, text=%s, threshold=%d, persist=%d",
+             command.c_str(), text.c_str(), threshold_percent, persist ? 1 : 0);
+    return true;
+}
+
+std::string CustomWakeWord::GetConfigJson() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "custom_multinet");
+    if (!commands_.empty()) {
+        cJSON_AddStringToObject(root, "command", commands_.front().command.c_str());
+        cJSON_AddStringToObject(root, "display", commands_.front().text.c_str());
+        cJSON_AddStringToObject(root, "action", commands_.front().action.c_str());
+    }
+    cJSON_AddNumberToObject(root, "threshold", static_cast<int>(threshold_ * 100 + 0.5f));
+    cJSON_AddStringToObject(root, "language", language_.c_str());
+    cJSON_AddNumberToObject(root, "duration", duration_);
+    cJSON_AddBoolToObject(root, "runtimeConfigurable", true);
+
+    char* json_str = cJSON_PrintUnformatted(root);
+    std::string result = json_str ? json_str : "{}";
+    if (json_str) {
+        cJSON_free(json_str);
+    }
+    cJSON_Delete(root);
+    return result;
 }
 
 void CustomWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_word)> callback) {
@@ -175,7 +285,12 @@ void CustomWakeWord::Feed(const std::vector<int16_t>& data) {
             for (int i = 0; i < mn_result->num && running_; i++) {
                 ESP_LOGI(TAG, "Custom wake word detected: command_id=%d, string=%s, prob=%f", 
                         mn_result->command_id[i], mn_result->string, mn_result->prob[i]);
-                auto& command = commands_[mn_result->command_id[i] - 1];
+                std::lock_guard<std::mutex> config_lock(config_mutex_);
+                int command_index = mn_result->command_id[i] - 1;
+                if (command_index < 0 || command_index >= static_cast<int>(commands_.size())) {
+                    continue;
+                }
+                auto& command = commands_[command_index];
                 if (command.action == "wake") {
                     last_detected_wake_word_ = command.text;
                     running_ = false;

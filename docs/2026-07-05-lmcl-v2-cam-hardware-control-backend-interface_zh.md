@@ -20,6 +20,7 @@
 - 设置屏幕主题。
 - 拍照，并把照片上传到后端下发的视觉解释接口。
 - 设置 / 查询 AEC 对话打断模式。
+- 查询 / 设置自定义唤醒词。
 - 重启设备。
 - 设置、取消、列出、重命名闹钟。
 
@@ -467,6 +468,107 @@ multipart 字段：
 - 该工具会直接重启设备，建议后端要求用户二次确认。
 - 普通闲聊模型不要自动调用。
 
+### 4.9 `self.wake_word.get_config`
+
+用途：查询当前本地唤醒词配置。
+
+参数：无。
+
+示例：
+
+```json
+{
+  "type": "mcp",
+  "payload": {
+    "jsonrpc": "2.0",
+    "id": 18,
+    "method": "tools/call",
+    "params": {
+      "name": "self.wake_word.get_config",
+      "arguments": {}
+    }
+  }
+}
+```
+
+当前 `lmcl-box-v2-cam` 已切到 `CONFIG_USE_CUSTOM_WAKE_WORD`，默认配置为：
+
+```json
+{
+  "type": "custom_multinet",
+  "command": "xiao le xiao le",
+  "display": "小乐小乐",
+  "action": "wake",
+  "threshold": 20,
+  "language": "cn",
+  "duration": 3000,
+  "runtimeConfigurable": true
+}
+```
+
+说明：
+
+- `command` 是 MultiNet 识别用的拼音命令词，中文建议用空格分隔拼音，例如 `xiao le xiao le`。
+- `display` 是唤醒成功后设备内部记录 / 上报 / 显示用的文本。
+- `threshold` 取值 1-99，数值越小越敏感，误唤醒也可能越多。
+- 该接口用于当前阶段验证和后端配置界面；它不是专用 WakeNet 模型训练接口。
+
+### 4.10 `self.wake_word.set_custom`
+
+用途：后端下发并持久化新的自定义唤醒词配置。
+
+参数：
+
+| 字段 | 类型 | 必填 | 范围 / 示例 | 说明 |
+| --- | --- | --- | --- | --- |
+| `command` | string | 是 | `xiao le xiao le` | 中文唤醒词拼音，空格分隔 |
+| `display` | string | 是 | `小乐小乐` | 唤醒成功后显示 / 上报的文本 |
+| `threshold` | integer | 否 | 1-99，默认 20 | 越小越敏感 |
+| `persist` | boolean | 否 | 默认 `true` | 是否写入 NVS，重启后仍生效 |
+
+示例：
+
+```json
+{
+  "type": "mcp",
+  "payload": {
+    "jsonrpc": "2.0",
+    "id": 19,
+    "method": "tools/call",
+    "params": {
+      "name": "self.wake_word.set_custom",
+      "arguments": {
+        "command": "xiao le xiao le",
+        "display": "小乐小乐",
+        "threshold": 20,
+        "persist": true
+      }
+    }
+  }
+}
+```
+
+成功返回：
+
+```json
+{
+  "success": true,
+  "tool": "self.wake_word.set_custom",
+  "command": "xiao le xiao le",
+  "display": "小乐小乐",
+  "threshold": 20,
+  "persist": true
+}
+```
+
+后端适配建议：
+
+- 配置页应同时让用户填写“中文显示名”和“拼音命令词”。
+- 保存前建议限制长度：唤醒词以 3-6 个音节/词组为宜，太短容易误唤醒，太长不容易唤醒。
+- 调低 `threshold` 会更敏感；调高会更保守。建议 UI 初始值用 20，并提供 10-40 的常用范围。
+- 如果用户配置后效果不稳定，可以通过同一接口恢复默认：`command=xiao le xiao le`，`display=小乐小乐`，`threshold=20`。
+- 该接口只适用于当前 `CONFIG_USE_CUSTOM_WAKE_WORD` 固件；如果后续换成专用 WakeNet 模型，运行时无法随意改成任意词，只能切换/更新模型资源。
+
 ## 5. Xiaole 自定义闹钟工具
 
 这些工具已经在 `main/companion_mcp_tools.cc` 注册，可通过同一个 MCP 通道调用。
@@ -566,6 +668,8 @@ multipart 字段：
 | 芯片温度多少、设备热不热 | 查询温度 | `self.get_device_status` | 读 `chip.temperature` |
 | 打开打断、关闭打断 | 设置 AEC | `self.AEC.set_mode` | `kAecOnDeviceSide` / `kAecOff` |
 | 现在能不能打断 | 查询 AEC | `self.AEC.get_mode` | 无 |
+| 修改唤醒词、把唤醒词改成小乐小乐 | 配置本地唤醒词 | `self.wake_word.set_custom` | `command` 填拼音，`display` 填显示文本 |
+| 当前唤醒词是什么 | 查询唤醒词配置 | `self.wake_word.get_config` | 无 |
 | 重启设备 | 重启 | `self.res.esp_restart` 或 `self.reboot` | 建议二次确认 |
 | 五分钟后提醒我 | 设置闹钟 | `alarm.set` | `type: relative`, `delay_seconds: 300` |
 | 明早七点半叫我 | 设置闹钟 | `alarm.set` | `type: time_of_day`, `hour: 7`, `minute: 30` |
@@ -658,7 +762,7 @@ multipart 字段：
 - 支持 `tools/list` 并把工具 schema 接入 LLM。
 - 支持 `tools/call` 到设备，并把结果返回给 LLM。
 - 实现图片解释 HTTP 接口。
-- 配置自然语言到工具调用的意图策略：拍照、音量、亮度、电量、温度、AEC、闹钟、重启确认。
+- 配置自然语言到工具调用的意图策略：拍照、音量、亮度、电量、温度、AEC、唤醒词配置、闹钟、重启确认。
 
 第二阶段再补：
 
