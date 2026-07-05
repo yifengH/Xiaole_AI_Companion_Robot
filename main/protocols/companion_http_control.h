@@ -2,6 +2,7 @@
 #define _COMPANION_HTTP_CONTROL_H_
 
 #include <cstddef>
+#include <functional>
 #include <string>
 
 // CompanionHttpControl 设备控制面 HTTP RPC 客户端(对齐 backend proto/companion_device.proto:GetPairingState/ReportDeviceStatus/CheckFirmwareUpdate)。
@@ -44,6 +45,7 @@ public:
     //                   由 Bootstrap 下发的 websocket 地址推导(同 host)+ 固定路径后缀。
     //   heartbeat_seconds = Bootstrap 下发的 config.heartbeatSeconds(默认 60)。
     void Configure(const std::string& bearer_token, const std::string& base_url, int heartbeat_seconds);
+    void SetRefreshCallback(std::function<bool()> callback);
 
     // GetPairingState:成功(phase 解析)返回 true 并填 out;HTTP 非 200 / 信封 code!=0 / 解析异常返回 false。
     // 遇 401 置 token_valid()=false(返回 false)。
@@ -75,6 +77,7 @@ private:
     int heartbeat_seconds_ = 60;
     bool configured_ = false;
     bool token_valid_ = true;
+    std::function<bool()> refresh_callback_;
 };
 
 #endif // _COMPANION_HTTP_CONTROL_H_

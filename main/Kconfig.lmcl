@@ -30,12 +30,14 @@ config DEVICE_FACTORY_SECRET
 
 config DEVICE_MODEL_CODE
     string "Device Model Code (deviceModelCode)"
+    default "lmcl-box-v2-cam" if BOARD_TYPE_LMCL_BOX_V2_CAM
     default "lmcl-box-v1"
     help
         Default model code reported in the status frame for the self-hosted server.
 
 config LMCL_SN_PREFIX
     string "LMCL Serial Number prefix"
+    default "lmcl-cam-" if BOARD_TYPE_LMCL_BOX_V2_CAM
     default "lmcl-"
     help
         LMCL sn 前缀约定(如 "lmcl-")。产线工装生成出厂 (sn, secret) 烧入 NVS "identity"
@@ -63,3 +65,11 @@ menu "Alarm Settings"
         help
             每次响铃时屏幕通知消息的显示持续时长(毫秒)。
 endmenu
+
+config USE_REALTIME_CHAT
+    bool "LMCL realtime interruptible chat"
+    default y
+    depends on BOARD_TYPE_LMCL_BOX_V2_CAM && USE_DEVICE_AEC
+    help
+        LMCL-specific low-latency conversation mode. It is kept in Kconfig.lmcl
+        so upstream Xiaozhi board defaults stay unchanged.

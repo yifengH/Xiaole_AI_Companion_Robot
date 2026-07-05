@@ -1,5 +1,7 @@
 # Plan 6：ESP32 固件重构（对齐新后端契约）
 
+> Update: This is a historical plan. The old notes saying lmcl-box-v1 has no camera are superseded by docs/cam-hardware-and-backend-interface_zh.md; current CAM hardware is configured through lmcl-box-v2-cam.
+
 > **注（2026-07-02）**：backend `docs/device-access.md` 已删除——设备/实时契约的真相源现为 `proto/agent_realtime/agent_realtime_core_model.proto` + `proto/companion_device/companion_device.proto` 的 proto 注释（开放平台接入文档归开放平台自身，不入库）。本文档后续出现的 `device-access.md` 引用，一律按「proto 契约」理解。
 
 > 全栈重构第 6 份、收尾一份。把陪伴设备「小乐」ESP32 固件从旧模型（一条 `/device/v1` WSS 承载配对/状态/OTA/对话全部）改成新契约：**(A) HTTP 控制面**（Bootstrap + 配对短轮询 + 心跳 + OTA，全 HTTP RPC，带设备令牌）+ **(B) 仅绑定后连 `/agent/v1` WSS**（纯对话，帧集对齐）。
@@ -56,7 +58,7 @@
 
 **音频（`main/audio/audio_service.{h,cc}`）**：编码 16k Opus 20ms(:90,h:39)、解码 24k 20ms(:76,82)；二进制 `[0x01|Opus]`(:76-86)；AEC 编译期 `CONFIG_USE_DEVICE_AEC` XOR `CONFIG_USE_SERVER_AEC`(:58-66)。**契约点全已匹配**。
 
-**构建**：默认板 `CONFIG_BOARD_TYPE_LMCL_BOX_V1`(`sdkconfig.defaults:39`)；型号码 `lmcl-box-v1`(`Kconfig.lmcl:24`，status 上报)；分区 `partitions/v2/16m.csv`（支持 OTA+rollback）；版本串 `esp_app_get_description()->version`(:349)。
+**构建**：默认板 `CONFIG_BOARD_TYPE_LMCL_BOX_V2_CAM`(`sdkconfig.defaults:39`)；型号码 `lmcl-box-v2-cam`(`Kconfig.lmcl:24`，status 上报)；分区 `partitions/v2/16m.csv`（支持 OTA+rollback）；版本串 `esp_app_get_description()->version`(:349)。
 
 ---
 

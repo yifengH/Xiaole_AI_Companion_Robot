@@ -25,6 +25,7 @@ CompanionProtocol::CompanionProtocol() {
 }
 
 CompanionProtocol::~CompanionProtocol() {
+    CompanionHttpControl::GetInstance().SetRefreshCallback(nullptr);
     vEventGroupDelete(event_group_handle_);
 }
 
@@ -198,10 +199,9 @@ bool CompanionProtocol::OpenAudioChannel() {
             auto type = cJSON_GetObjectItem(root, "type");
             if (cJSON_IsString(type)) {
                 auto data_obj = cJSON_GetObjectItem(root, "data");
-                UpdateCurrentTurn(data_obj);  // 全下行文本帧带 turnId → 更新当前轮(二进制据此丢迟到帧)
                 if (strcmp(type->valuestring, "ready") == 0) {
                     ParseServerReady(root);
-                } else {
+                } else if (!ShouldDropStaleTextFrame(type->valuestring, data_obj)) {
                     // stt/subtitle/audioStart/turnEnd/intent/error 交 application 处理。
                     if (on_incoming_json_ != nullptr) {
                         on_incoming_json_(root);
@@ -222,8 +222,8 @@ bool CompanionProtocol::OpenAudioChannel() {
         }
     });
 
-    ESP_LOGI(TAG, "Connecting to /agent/v1: %s", url.c_str());
-    if (!websocket_->Connect(url.c_str())) {
+    ESP_LOGI(TAG, "Connecting to /agent/v1: %s", websocket_url_.c_str());
+    if (!websocket_->Connect(websocket_url_.c_str())) {
         // 底层 WebSocket 组件未透出握手 HTTP 状态码(401/403/503);每次连接前已重 Bootstrap,令牌恒新。
         // 被封禁/吊销会在握手被拒(连接失败)→ 上层退避重连(不狂连)。
         ESP_LOGE(TAG, "Failed to connect to /agent/v1, code=%d", websocket_->GetLastError());
@@ -269,17 +269,33 @@ void CompanionProtocol::ParseServerReady(const cJSON* root) {
     xEventGroupSetBits(event_group_handle_, COMPANION_PROTOCOL_SERVER_READY_EVENT);
 }
 
-void CompanionProtocol::UpdateCurrentTurn(const cJSON* data_obj) {
+bool CompanionProtocol::ShouldDropStaleTextFrame(const char* type, const cJSON* data_obj) {
     if (!cJSON_IsObject(data_obj)) {
-        return;
+        return false;
     }
     auto turn_id = cJSON_GetObjectItem(data_obj, "turnId");
-    // turnId 是 int64,protojson 编码为 JSON 字符串;只需低 8 位区分「当前轮 vs 刚作废轮」。
-    if (cJSON_IsString(turn_id) && turn_id->valuestring != nullptr) {
-        long long id = strtoll(turn_id->valuestring, nullptr, 10);
-        current_turn_low8_ = static_cast<uint8_t>(id & 0xff);
-        turn_known_ = true;
+    if (!cJSON_IsString(turn_id) || turn_id->valuestring == nullptr) {
+        return false;
     }
+
+    long long id = strtoll(turn_id->valuestring, nullptr, 10);
+    uint8_t low8 = static_cast<uint8_t>(id & 0xff);
+    bool starts_new_turn = strcmp(type, "audioStart") == 0 ||
+                           strcmp(type, "turnStart") == 0 ||
+                           strcmp(type, "stt") == 0;
+    if (!turn_known_ || starts_new_turn) {
+        current_turn_low8_ = low8;
+        turn_known_ = true;
+        return false;
+    }
+
+    if (low8 != current_turn_low8_) {
+        ESP_LOGW(TAG, "Drop stale %s frame turnId=%lld currentLow8=%u",
+                 type, id, current_turn_low8_);
+        return true;
+    }
+
+    return false;
 }
 
 bool CompanionProtocol::WaitForBound() {
@@ -293,6 +309,11 @@ bool CompanionProtocol::WaitForBound() {
     constexpr int kMaxConsecutiveFailures = 5;
     int consecutive_failures = 0;
     for (int waited = 0; waited < kMaxWaitSec; waited += kPollIntervalSec) {
+        int heartbeat_seconds = CompanionHttpControl::GetInstance().heartbeat_seconds();
+        if (heartbeat_seconds > 0 && waited > 0 && (waited % heartbeat_seconds) == 0) {
+            CompanionHttpControl::GetInstance().ReportDeviceStatus();
+        }
+
         // 令牌 401(GetPairingState 把 token_valid_ 置 false)→ 上层重 Bootstrap(重试整个 OpenAudioChannel)。
         if (!CompanionHttpControl::GetInstance().token_valid()) {
             ESP_LOGW(TAG, "Control-plane token invalid (401) — need re-Bootstrap");
@@ -380,10 +401,14 @@ bool CompanionProtocol::Bootstrap(std::string& websocket_url) {
         auto hb = cJSON_IsObject(config) ? cJSON_GetObjectItem(config, "heartbeatSeconds") : nullptr;
         if (cJSON_IsString(token) && cJSON_IsString(ws)) {
             websocket_url = AppendTokenToUrl(ws->valuestring, token->valuestring);
+            websocket_url_ = websocket_url;
             int heartbeat_seconds = cJSON_IsNumber(hb) ? hb->valueint : 60;
             // Configure HTTP 控制面(配对轮询 / 心跳 / OTA):令牌 + 控制面 base(从 Bootstrap 地址推导)+ 心跳周期。
             std::string control_base = StripLastPathSegment(bootstrap_url);
             CompanionHttpControl::GetInstance().Configure(token->valuestring, control_base, heartbeat_seconds);
+            CompanionHttpControl::GetInstance().SetRefreshCallback([this]() {
+                return Bootstrap(websocket_url_);
+            });
             ESP_LOGI(TAG, "Bootstrap ok: agent ws=%s, heartbeat=%ds, control=%s",
                      ws->valuestring, heartbeat_seconds, control_base.c_str());
             ok = true;

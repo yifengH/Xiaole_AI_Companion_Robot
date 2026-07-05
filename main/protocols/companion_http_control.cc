@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <utility>
 
 #include <cJSON.h>
 #include <esp_log.h>
@@ -46,6 +47,10 @@ void CompanionHttpControl::Configure(const std::string& bearer_token,
     ESP_LOGI(TAG, "Configured: base=%s, heartbeat=%ds", base_url_.c_str(), heartbeat_seconds_);
 }
 
+void CompanionHttpControl::SetRefreshCallback(std::function<bool()> callback) {
+    refresh_callback_ = std::move(callback);
+}
+
 int CompanionHttpControl::PostRpc(const std::string& method,
                                   const std::string& body_json,
                                   std::string& response_out) {
@@ -54,36 +59,44 @@ int CompanionHttpControl::PostRpc(const std::string& method,
         return -1;
     }
 
-    std::string url = base_url_ + "/" + method;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        std::string url = base_url_ + "/" + method;
 
-    auto http = Board::GetInstance().GetNetwork()->CreateHttp(0);
-    http->SetHeader("Content-Type", "application/json");
-    std::string auth = "Bearer " + bearer_token_;
-    http->SetHeader("Authorization", auth.c_str());
-    http->SetContent(std::string(body_json));
+        auto http = Board::GetInstance().GetNetwork()->CreateHttp(0);
+        http->SetHeader("Content-Type", "application/json");
+        std::string auth = "Bearer " + bearer_token_;
+        http->SetHeader("Authorization", auth.c_str());
+        http->SetContent(std::string(body_json));
 
-    ESP_LOGI(TAG, "POST %s", url.c_str());
-    if (!http->Open("POST", url)) {
-        ESP_LOGE(TAG, "Failed to open HTTP connection for %s, code=0x%x",
-                 method.c_str(), http->GetLastError());
-        return -1;
+        ESP_LOGI(TAG, "POST %s", url.c_str());
+        if (!http->Open("POST", url)) {
+            ESP_LOGE(TAG, "Failed to open HTTP connection for %s, code=0x%x",
+                     method.c_str(), http->GetLastError());
+            return -1;
+        }
+
+        int status_code = http->GetStatusCode();
+        std::string response = http->ReadAll();
+        http->Close();
+
+        if (status_code == 401) {
+            token_valid_ = false;
+            ESP_LOGW(TAG, "%s rejected: 401 token invalid/expired", method.c_str());
+            if (attempt == 0 && refresh_callback_ && refresh_callback_()) {
+                ESP_LOGI(TAG, "Token refreshed; retrying %s once", method.c_str());
+                continue;
+            }
+        }
+
+        if (status_code == 200) {
+            response_out = response;
+        }
+
+        ESP_LOGI(TAG, "%s status=%d", method.c_str(), status_code);
+        return status_code;
     }
 
-    int status_code = http->GetStatusCode();
-    std::string response = http->ReadAll();
-    http->Close();
-
-    if (status_code == 401) {
-        token_valid_ = false;
-        ESP_LOGW(TAG, "%s rejected: 401 token invalid/expired", method.c_str());
-    }
-
-    if (status_code == 200) {
-        response_out = response;
-    }
-
-    ESP_LOGI(TAG, "%s status=%d", method.c_str(), status_code);
-    return status_code;
+    return -1;
 }
 
 bool CompanionHttpControl::GetPairingState(PairingState& out) {

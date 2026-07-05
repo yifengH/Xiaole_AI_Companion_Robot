@@ -41,6 +41,7 @@ public:
 private:
     EventGroupHandle_t event_group_handle_;
     std::unique_ptr<WebSocket> websocket_;
+    std::string websocket_url_;
 
     // turnId 跟踪:下行二进制音频帧 = [0x01][turnId 低8位][Opus];非当前轮的迟到帧据此丢弃。
     // current_turn_low8_ 由下行文本帧的 data.turnId(int64 → 取低 8 位)更新。
@@ -59,8 +60,8 @@ private:
     bool Bootstrap(std::string& websocket_url);
     // 未绑定时 HTTP GetPairingState 轮询直到 phase=BOUND(屏显配对码/倒计时)。已绑定/超时→true/false。
     bool WaitForBound();
-    // 从下行文本帧 data.turnId 更新当前轮低 8 位(二进制音频据此丢弃迟到帧)。
-    void UpdateCurrentTurn(const cJSON* data_obj);
+    // Returns true when a text frame belongs to an obsolete turn and should be ignored.
+    bool ShouldDropStaleTextFrame(const char* type, const cJSON* data_obj);
 };
 
 #endif

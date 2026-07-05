@@ -401,13 +401,13 @@ void Application::HandleActivationDoneEvent() {
 }
 
 void Application::ActivationTask() {
-    // Create OTA object (仅用于标记当前固件有效 + 取版本号;升级走 WSS update 帧)
+    // Create OTA object (仅用于标记当前固件有效 + 取版本号;升级由 HTTP CheckFirmwareUpdate 触发)
     ota_ = std::make_unique<CompanionOta>();
 
     // Check for new assets version(设备内部资源分区,非接入协议)
     CheckAssetsVersion();
 
-    // OTA 后首次正常启动 → 标记当前固件有效,取消回滚。固件更新检测改由连上后的 checkUpdate 帧驱动。
+    // OTA 后首次正常启动 → 标记当前固件有效,取消回滚。固件更新检测由 HTTP 控制面驱动。
     ota_->MarkCurrentVersionValid();
 
     // Initialize the protocol
@@ -601,24 +601,7 @@ void Application::InitializeProtocol() {
                 }
             });
         };
-        if (strcmp(type->valuestring, "tts") == 0) {
-            auto state = cJSON_GetObjectItem(body, "state");
-            if (!cJSON_IsString(state)) {
-                ESP_LOGW(TAG, "TTS message missing state");
-                return;
-            }
-            if (strcmp(state->valuestring, "start") == 0) {
-                handle_tts_start();
-            } else if (strcmp(state->valuestring, "stop") == 0) {
-                handle_tts_stop();
-            } else if (strcmp(state->valuestring, "sentence") == 0) {
-                auto text = cJSON_GetObjectItem(body, "text");
-                if (cJSON_IsString(text)) {
-                    ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    QueueTtsCaption(text->valuestring);
-                }
-            }
-        } else if (strcmp(type->valuestring, "audioStart") == 0 || strcmp(type->valuestring, "turnStart") == 0) {
+        if (strcmp(type->valuestring, "audioStart") == 0 || strcmp(type->valuestring, "turnStart") == 0) {
             handle_tts_start();
         } else if (strcmp(type->valuestring, "audioEnd") == 0 || strcmp(type->valuestring, "turnEnd") == 0) {
             handle_tts_stop();
@@ -647,6 +630,18 @@ void Application::InitializeProtocol() {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
                 Schedule([display, message = std::string(text->valuestring)]() {
                     display->SetChatMessage("user", message.c_str());
+                });
+            }
+        } else if (strcmp(type->valuestring, "intent") == 0) {
+            auto kind = cJSON_GetObjectItem(body, "kind");
+            if (cJSON_IsString(kind) && strcmp(kind->valuestring, "SLEEP") == 0) {
+                aborted_ = true;
+                tts_audio_active_ = false;
+                tts_stop_received_ = false;
+                ResetTtsCaption();
+                audio_service_.ResetDecoder();
+                Schedule([this]() {
+                    SetDeviceState(kDeviceStateIdle);
                 });
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
