@@ -5,6 +5,7 @@
 #include <thread>
 #include <memory>
 #include <vector>
+#include <mutex>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -30,6 +31,8 @@ private:
     camera_fb_t *current_fb_ = nullptr;
     uint8_t *encode_buf_ = nullptr;  // Buffer for JPEG encoding (with optional byte swap)
     size_t encode_buf_size_ = 0;
+    bool suppress_preview_ = false;
+    std::recursive_mutex capture_mutex_;
 
 public:
     Esp32Camera(const camera_config_t &config);
@@ -37,6 +40,8 @@ public:
 
     virtual void SetExplainUrl(const std::string &url, const std::string &token) override;
     virtual bool Capture() override;
+    virtual bool CaptureJpeg(std::vector<uint8_t>& out, int quality = 70) override;
+    virtual std::string CaptureAndExplain(const std::string& question) override;
     virtual bool SetHMirror(bool enabled) override;
     virtual bool SetVFlip(bool enabled) override;
     virtual bool SetSwapBytes(bool enabled) override;

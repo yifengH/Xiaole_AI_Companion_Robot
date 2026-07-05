@@ -18,6 +18,10 @@
 
 #define TAG "Companion"
 
+namespace {
+constexpr size_t kMaxVisionFrameBytes = 512 * 1024;
+}
+
 CompanionProtocol::CompanionProtocol() {
     event_group_handle_ = xEventGroupCreate();
     server_sample_rate_ = 24000;
@@ -101,6 +105,22 @@ bool CompanionProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     serialized.resize(1 + packet->payload.size());
     serialized[0] = 0x01;
     memcpy(serialized.data() + 1, packet->payload.data(), packet->payload.size());
+    return websocket_->Send(serialized.data(), serialized.size(), true);
+}
+
+bool CompanionProtocol::SendImage(const uint8_t* jpeg, size_t len) {
+    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        return false;
+    }
+    if (jpeg == nullptr || len == 0 || len > kMaxVisionFrameBytes) {
+        return false;
+    }
+
+    // 上行二进制帧:首字节 0x02 = JPEG 图像帧,其后是裸 JPEG。
+    std::string serialized;
+    serialized.resize(1 + len);
+    serialized[0] = 0x02;
+    memcpy(serialized.data() + 1, jpeg, len);
     return websocket_->Send(serialized.data(), serialized.size(), true);
 }
 

@@ -11,6 +11,7 @@
 #include <deque>
 #include <memory>
 #include <functional>
+#include <atomic>
 
 #include "protocol.h"
 #include "companion_ota.h"
@@ -160,6 +161,10 @@ private:
     int clock_ticks_ = 0;
     int last_activity_tick_ = 0;   // 上次会话活动的 clock tick(本地空闲判定用)
     TaskHandle_t activation_task_handle_ = nullptr;
+    std::atomic<TaskHandle_t> vision_task_handle_{nullptr};
+    std::atomic<bool> vision_task_running_{false};
+    std::atomic<bool> vision_frame_pending_{false};
+    std::atomic<uint32_t> vision_generation_{0};
 
 
     // Event handlers
@@ -181,6 +186,9 @@ private:
     void CheckAssetsVersion();
     void InitializeProtocol();
     void EnsureAudioChannelOpen();  // 常驻连接:确保 WSS 已连(未连则发起,成功后回到待唤醒)
+    void StartVisionLoop();
+    void StopVisionLoop();
+    void VisionLoop();
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;
     void ResetTtsCaption();

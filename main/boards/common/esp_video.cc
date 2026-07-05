@@ -56,6 +56,19 @@
 
 #define TAG "EspVideo"
 
+namespace {
+size_t AppendJpegChunk(void* arg, size_t index, const void* data, size_t len) {
+    (void)index;
+    if (data == nullptr || len == 0) {
+        return len;
+    }
+    auto out = static_cast<std::vector<uint8_t>*>(arg);
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    out->insert(out->end(), bytes, bytes + len);
+    return len;
+}
+}
+
 #if defined(CONFIG_CAMERA_SENSOR_SWAP_PIXEL_BYTE_ORDER) || defined(CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP)
 #warning \
     "CAMERA_SENSOR_SWAP_PIXEL_BYTE_ORDER or CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP is enabled, which may cause image corruption in YUV422 format!"
@@ -386,6 +399,7 @@ void EspVideo::SetExplainUrl(const std::string& url, const std::string& token) {
 }
 
 bool EspVideo::Capture() {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
@@ -730,7 +744,7 @@ bool EspVideo::Capture() {
     }
 
     // 显示预览图片
-    auto display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
+    auto display = suppress_preview_ ? nullptr : dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
     if (display != nullptr) {
         if (!frame_.data) {
             ESP_LOGE(TAG, "frame.data is null");
@@ -872,6 +886,43 @@ bool EspVideo::SetVFlip(bool enabled) {
         return false;
     }
     return true;
+}
+
+bool EspVideo::CaptureJpeg(std::vector<uint8_t>& out, int quality) {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
+    out.clear();
+    suppress_preview_ = true;
+    bool captured = Capture();
+    suppress_preview_ = false;
+    if (!captured || frame_.data == nullptr || frame_.len == 0) {
+        return false;
+    }
+
+#ifdef CONFIG_XIAOZHI_CAMERA_ALLOW_JPEG_INPUT
+    if (frame_.format == V4L2_PIX_FMT_JPEG) {
+        out.assign(frame_.data, frame_.data + frame_.len);
+        return !out.empty();
+    }
+#endif
+
+    uint16_t w = frame_.width ? frame_.width : 320;
+    uint16_t h = frame_.height ? frame_.height : 240;
+    bool ok = image_to_jpeg_cb(frame_.data, frame_.len, w, h, frame_.format, quality,
+        AppendJpegChunk, &out);
+    if (!ok || out.empty()) {
+        out.clear();
+        ESP_LOGE(TAG, "Failed to encode captured frame to JPEG");
+        return false;
+    }
+    return true;
+}
+
+std::string EspVideo::CaptureAndExplain(const std::string& question) {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
+    if (!Capture()) {
+        throw std::runtime_error("Failed to capture photo");
+    }
+    return Explain(question);
 }
 
 /**

@@ -5,6 +5,8 @@
 #include <lvgl.h>
 #include <thread>
 #include <memory>
+#include <vector>
+#include <mutex>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -36,6 +38,8 @@ private:
     jpeg_dec_handle_t jpeg_dec_;
     jpeg_dec_io_t *jpeg_io_;
     jpeg_dec_header_info_t *jpeg_out_;
+    bool suppress_preview_ = false;
+    std::recursive_mutex capture_mutex_;
     // 检测状态机
     enum DetectionState {
         IDLE,           // 空闲状态
@@ -65,6 +69,8 @@ public:
 
     virtual void SetExplainUrl(const std::string& url, const std::string& token);
     virtual bool Capture();
+    virtual bool CaptureJpeg(std::vector<uint8_t>& out, int quality = 70) override;
+    virtual std::string CaptureAndExplain(const std::string& question) override;
     // 翻转控制函数
     virtual bool SetHMirror(bool enabled) override;
     virtual bool SetVFlip(bool enabled) override;

@@ -17,6 +17,19 @@
 
 #define TAG "Esp32Camera"
 
+namespace {
+size_t AppendJpegChunk(void* arg, size_t index, const void* data, size_t len) {
+    (void)index;
+    if (data == nullptr || len == 0) {
+        return len;
+    }
+    auto out = static_cast<std::vector<uint8_t>*>(arg);
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    out->insert(out->end(), bytes, bytes + len);
+    return len;
+}
+}
+
 Esp32Camera::Esp32Camera(const camera_config_t &config) {
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
@@ -57,6 +70,7 @@ void Esp32Camera::SetExplainUrl(const std::string &url, const std::string &token
 }
 
 bool Esp32Camera::Capture() {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
     if (encoder_thread_.joinable()) {
         encoder_thread_.join();
     }
@@ -108,23 +122,29 @@ bool Esp32Camera::Capture() {
         }
 
         // Allocate separate buffer for preview display
-        uint8_t *preview_data = (uint8_t *)heap_caps_malloc(data_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (preview_data != nullptr) {
-            memcpy(preview_data, encode_buf_, data_size);
-            auto display = dynamic_cast<LvglDisplay *>(Board::GetInstance().GetDisplay());
-            if (display != nullptr) {
-                display->SetPreviewImage(std::make_unique<LvglAllocatedImage>(preview_data, data_size, current_fb_->width, current_fb_->height, current_fb_->width * 2, LV_COLOR_FORMAT_RGB565));
-            } else {
-                heap_caps_free(preview_data);
+        if (!suppress_preview_) {
+            uint8_t *preview_data = (uint8_t *)heap_caps_malloc(data_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (preview_data != nullptr) {
+                memcpy(preview_data, encode_buf_, data_size);
+                auto display = dynamic_cast<LvglDisplay *>(Board::GetInstance().GetDisplay());
+                if (display != nullptr) {
+                    display->SetPreviewImage(std::make_unique<LvglAllocatedImage>(preview_data, data_size, current_fb_->width, current_fb_->height, current_fb_->width * 2, LV_COLOR_FORMAT_RGB565));
+                } else {
+                    heap_caps_free(preview_data);
+                }
             }
         }
     } else if (current_fb_->format == PIXFORMAT_JPEG) {
         // JPEG format preview usually requires decoding, skip preview display for now, just log
-        ESP_LOGW(TAG, "JPEG capture success, len=%zu, but not supported for preview", current_fb_->len);
+        if (!suppress_preview_) {
+            ESP_LOGW(TAG, "JPEG capture success, len=%zu, but not supported for preview", current_fb_->len);
+        }
     }
 
-    ESP_LOGI(TAG, "Captured frame: %dx%d, len=%zu, format=%d",
-             current_fb_->width, current_fb_->height, current_fb_->len, current_fb_->format);
+    if (!suppress_preview_) {
+        ESP_LOGI(TAG, "Captured frame: %dx%d, len=%zu, format=%d",
+                 current_fb_->width, current_fb_->height, current_fb_->len, current_fb_->format);
+    }
 
     return true;
 }
@@ -150,6 +170,70 @@ bool Esp32Camera::SetVFlip(bool enabled) {
 bool Esp32Camera::SetSwapBytes(bool enabled) {
     swap_bytes_enabled_ = enabled;
     return true;
+}
+
+bool Esp32Camera::CaptureJpeg(std::vector<uint8_t>& out, int quality) {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
+    out.clear();
+    suppress_preview_ = true;
+    bool captured = Capture();
+    suppress_preview_ = false;
+    if (!captured || current_fb_ == nullptr) {
+        return false;
+    }
+
+    if (current_fb_->format == PIXFORMAT_JPEG) {
+        out.assign(current_fb_->buf, current_fb_->buf + current_fb_->len);
+        return !out.empty();
+    }
+
+    uint16_t w = current_fb_->width;
+    uint16_t h = current_fb_->height;
+    v4l2_pix_fmt_t enc_fmt;
+    switch (current_fb_->format) {
+        case PIXFORMAT_RGB565:
+            enc_fmt = V4L2_PIX_FMT_RGB565;
+            break;
+        case PIXFORMAT_YUV422:
+            enc_fmt = V4L2_PIX_FMT_YUYV;
+            break;
+        case PIXFORMAT_YUV420:
+            enc_fmt = V4L2_PIX_FMT_YUV420;
+            break;
+        case PIXFORMAT_GRAYSCALE:
+            enc_fmt = V4L2_PIX_FMT_GREY;
+            break;
+        case PIXFORMAT_RGB888:
+            enc_fmt = V4L2_PIX_FMT_RGB24;
+            break;
+        default:
+            ESP_LOGE(TAG, "Unsupported pixel format for JPEG capture: %d", current_fb_->format);
+            return false;
+    }
+
+    uint8_t* jpeg_src_buf = current_fb_->buf;
+    size_t jpeg_src_len = current_fb_->len;
+    if (current_fb_->format == PIXFORMAT_RGB565 && encode_buf_ != nullptr) {
+        jpeg_src_buf = encode_buf_;
+        jpeg_src_len = encode_buf_size_;
+    }
+
+    bool ok = image_to_jpeg_cb(jpeg_src_buf, jpeg_src_len, w, h, enc_fmt, quality,
+        AppendJpegChunk, &out);
+    if (!ok || out.empty()) {
+        out.clear();
+        ESP_LOGE(TAG, "Failed to encode captured frame to JPEG");
+        return false;
+    }
+    return true;
+}
+
+std::string Esp32Camera::CaptureAndExplain(const std::string& question) {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
+    if (!Capture()) {
+        throw std::runtime_error("Failed to capture photo");
+    }
+    return Explain(question);
 }
 
 std::string Esp32Camera::Explain(const std::string &question) {

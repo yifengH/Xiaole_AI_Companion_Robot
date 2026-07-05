@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
+#include <vector>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
@@ -24,6 +25,25 @@
 #define TAG "Application"
 
 namespace {
+constexpr int kVisionFrameIntervalMs =
+#if CONFIG_LMCL_VISION_UPLINK_ENABLED
+    CONFIG_LMCL_VISION_FRAME_INTERVAL_MS;
+#else
+    1000;
+#endif
+constexpr int kVisionJpegQuality =
+#if CONFIG_LMCL_VISION_UPLINK_ENABLED
+    CONFIG_LMCL_VISION_JPEG_QUALITY;
+#else
+    70;
+#endif
+constexpr size_t kVisionMaxFrameBytes =
+#if CONFIG_LMCL_VISION_UPLINK_ENABLED
+    CONFIG_LMCL_VISION_MAX_FRAME_BYTES;
+#else
+    512 * 1024;
+#endif
+
 bool IsUtf8ContinuationByte(unsigned char ch) {
     return (ch & 0xC0) == 0x80;
 }
@@ -315,7 +335,10 @@ void Application::Run() {
                 (clock_ticks_ % std::max(1, CompanionHttpControl::GetInstance().heartbeat_seconds()) == 0)) {
                 if (!CompanionHttpControl::GetInstance().token_valid()) {
                     ESP_LOGW(TAG, "Control-plane token expired (401) — reconnecting to re-Bootstrap");
-                    if (protocol_) { protocol_->CloseAudioChannel(); }
+                    if (protocol_) {
+                        StopVisionLoop();
+                        protocol_->CloseAudioChannel();
+                    }
                 } else {
                     CompanionHttpControl::GetInstance().ReportDeviceStatus();
                 }
@@ -370,6 +393,7 @@ void Application::HandleNetworkDisconnectedEvent() {
     auto state = GetDeviceState();
     if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
+        StopVisionLoop();
         protocol_->CloseAudioChannel();
     }
 
@@ -540,6 +564,7 @@ void Application::InitializeProtocol() {
             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
                 protocol_->server_sample_rate(), codec->output_sample_rate());
         }
+        StartVisionLoop();
         // 通道打开后顺带查一次 OTA(开机/重连后即查;之后主循环每 ~10min 周期查)。触发源为 HTTP
         // CheckFirmwareUpdate(旧链路是 WSS checkUpdate/update 帧,已移除)。
         Schedule([this]() {
@@ -555,6 +580,7 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelClosed([this, &board]() {
+        StopVisionLoop();
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         aborted_ = true;
         tts_audio_active_ = false;
@@ -732,6 +758,7 @@ void Application::HandleToggleChatEvent() {
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
     } else if (state == kDeviceStateListening) {
+        StopVisionLoop();
         protocol_->CloseAudioChannel();
     }
 }
@@ -956,6 +983,94 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
+void Application::StartVisionLoop() {
+#if CONFIG_LMCL_VISION_UPLINK_ENABLED
+    if (Board::GetInstance().GetCamera() == nullptr) {
+        return;
+    }
+    vision_generation_.fetch_add(1);
+    vision_frame_pending_.store(false);
+    if (vision_task_handle_.load() != nullptr) {
+        vision_task_running_.store(true);
+        return;
+    }
+
+    vision_task_running_.store(true);
+    TaskHandle_t handle = nullptr;
+    BaseType_t ok = xTaskCreate([](void* arg) {
+        auto app = static_cast<Application*>(arg);
+        app->VisionLoop();
+        app->vision_task_handle_.store(nullptr);
+        vTaskDelete(NULL);
+    }, "vision", 8192, this, 2, &handle);
+    if (ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create vision uplink task");
+        vision_task_running_.store(false);
+        return;
+    }
+    vision_task_handle_.store(handle);
+#endif
+}
+
+void Application::StopVisionLoop() {
+#if CONFIG_LMCL_VISION_UPLINK_ENABLED
+    vision_task_running_.store(false);
+    vision_generation_.fetch_add(1);
+    vision_frame_pending_.store(false);
+#endif
+}
+
+void Application::VisionLoop() {
+#if CONFIG_LMCL_VISION_UPLINK_ENABLED
+    auto camera = Board::GetInstance().GetCamera();
+    if (camera == nullptr) {
+        vision_task_running_.store(false);
+        return;
+    }
+
+    while (true) {
+        if (!vision_task_running_.load()) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        std::vector<uint8_t> jpeg;
+        if (vision_frame_pending_.load()) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        uint32_t generation = vision_generation_.load();
+        if (camera->CaptureJpeg(jpeg, kVisionJpegQuality) && !jpeg.empty()) {
+            if (jpeg.size() <= kVisionMaxFrameBytes) {
+                vision_frame_pending_.store(true);
+                Schedule([this, generation, frame = std::move(jpeg)]() mutable {
+                    if (!vision_task_running_.load() || vision_generation_.load() != generation) {
+                        return;
+                    }
+                    if (protocol_ != nullptr && protocol_->IsAudioChannelOpened()) {
+                        protocol_->SendImage(frame.data(), frame.size());
+                    }
+                    if (vision_generation_.load() == generation) {
+                        vision_frame_pending_.store(false);
+                    }
+                });
+            } else {
+                ESP_LOGW(TAG, "Skip vision frame, size=%u exceeds limit=%u",
+                         static_cast<unsigned>(jpeg.size()), static_cast<unsigned>(kVisionMaxFrameBytes));
+            }
+        }
+
+        int remaining_ms = kVisionFrameIntervalMs;
+        while (vision_task_running_.load() && remaining_ms > 0) {
+            int delay_ms = std::min(remaining_ms, 100);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+            remaining_ms -= delay_ms;
+        }
+    }
+#endif
+}
+
 void Application::ResetTtsCaption() {
     std::lock_guard<std::mutex> lock(tts_caption_mutex_);
     pending_tts_captions_.clear();
@@ -1033,6 +1148,7 @@ void Application::Reboot() {
     ESP_LOGI(TAG, "Rebooting...");
     // Disconnect the audio channel
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        StopVisionLoop();
         protocol_->CloseAudioChannel();
     }
     protocol_.reset();
@@ -1052,6 +1168,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& pac
     // Close audio channel if it's open
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         ESP_LOGI(TAG, "Closing audio channel before firmware upgrade");
+        StopVisionLoop();
         protocol_->CloseAudioChannel();
     }
     ESP_LOGI(TAG, "Starting firmware upgrade from URL: %s", upgrade_url.c_str());
@@ -1122,6 +1239,7 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     } else if (state == kDeviceStateListening) {   
         Schedule([this]() {
             if (protocol_) {
+                StopVisionLoop();
                 protocol_->CloseAudioChannel();
             }
         });
@@ -1201,6 +1319,7 @@ void Application::SetAecMode(AecMode mode) {
 
         // If the AEC mode is changed, close the audio channel
         if (protocol_ && protocol_->IsAudioChannelOpened()) {
+            StopVisionLoop();
             protocol_->CloseAudioChannel();
         }
     });
@@ -1214,6 +1333,7 @@ void Application::ResetProtocol() {
     Schedule([this]() {
         // Close audio channel if opened
         if (protocol_ && protocol_->IsAudioChannelOpened()) {
+            StopVisionLoop();
             protocol_->CloseAudioChannel();
         }
         // Reset protocol

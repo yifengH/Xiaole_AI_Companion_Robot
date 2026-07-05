@@ -2,6 +2,8 @@
 #define PROTOCOL_H
 
 #include <cJSON.h>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <functional>
 #include <chrono>
@@ -72,6 +74,7 @@ public:
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
+    virtual bool SendImage(const uint8_t* jpeg, size_t len) { return false; }
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);
     virtual void SendStopListening();

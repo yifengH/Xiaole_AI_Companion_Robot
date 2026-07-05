@@ -73,3 +73,41 @@ config USE_REALTIME_CHAT
     help
         LMCL-specific low-latency conversation mode. It is kept in Kconfig.lmcl
         so upstream Xiaozhi board defaults stay unchanged.
+
+menu "LMCL Vision Uplink"
+    config LMCL_VISION_UPLINK_ENABLED
+        bool "Enable /agent/v1 JPEG vision uplink"
+        default y
+        depends on !IDF_TARGET_ESP32
+        help
+            When the board has a camera and the Companion websocket is open,
+            periodically capture a JPEG frame and send it as binary frame
+            [0x02][JPEG] on /agent/v1. The server decides at model runtime
+            whether the frame is used.
+
+    config LMCL_VISION_FRAME_INTERVAL_MS
+        int "Vision frame interval (ms)"
+        default 1000
+        range 333 10000
+        depends on LMCL_VISION_UPLINK_ENABLED
+        help
+            Minimum delay between captured JPEG frames. Default is 1 FPS.
+
+    config LMCL_VISION_JPEG_QUALITY
+        int "Vision JPEG quality"
+        default 70
+        range 30 95
+        depends on LMCL_VISION_UPLINK_ENABLED
+        help
+            JPEG quality used for vision uplink frames when the camera source
+            is not already JPEG.
+
+    config LMCL_VISION_MAX_FRAME_BYTES
+        int "Vision max frame bytes"
+        default 524288
+        range 32768 1048576
+        depends on LMCL_VISION_UPLINK_ENABLED
+        help
+            Maximum JPEG frame size sent to /agent/v1. The backend currently
+            accepts up to 512 KiB per frame.
+endmenu

@@ -5,6 +5,7 @@
 #include <thread>
 #include <memory>
 #include <vector>
+#include <mutex>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -39,6 +40,8 @@ private:
     std::string explain_url_;
     std::string explain_token_;
     std::thread encoder_thread_;
+    bool suppress_preview_ = false;
+    std::recursive_mutex capture_mutex_;
 
 public:
     EspVideo(const esp_video_init_config_t& config);
@@ -46,6 +49,8 @@ public:
 
     virtual void SetExplainUrl(const std::string& url, const std::string& token);
     virtual bool Capture();
+    virtual bool CaptureJpeg(std::vector<uint8_t>& out, int quality = 70) override;
+    virtual std::string CaptureAndExplain(const std::string& question) override;
     // 翻转控制函数
     virtual bool SetHMirror(bool enabled) override;
     virtual bool SetVFlip(bool enabled) override;

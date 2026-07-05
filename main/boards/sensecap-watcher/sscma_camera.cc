@@ -569,6 +569,7 @@ void SscmaCamera::SetExplainUrl(const std::string& url, const std::string& token
 }
 
 bool SscmaCamera::Capture() {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
 
     SscmaData data;
     int ret = 0;
@@ -606,6 +607,10 @@ bool SscmaCamera::Capture() {
         return false;
     }
     heap_caps_free(data.img);
+
+    if (suppress_preview_) {
+        return true;
+    }
 
     //DECODE JPEG
     if (!jpeg_dec_ || !jpeg_io_ || !jpeg_out_ || !preview_image_.data) {
@@ -655,6 +660,28 @@ bool SscmaCamera::SetHMirror(bool enabled) {
 
 bool SscmaCamera::SetVFlip(bool enabled) {
     return false;
+}
+
+bool SscmaCamera::CaptureJpeg(std::vector<uint8_t>& out, int quality) {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
+    (void)quality;
+    out.clear();
+    suppress_preview_ = true;
+    bool captured = Capture();
+    suppress_preview_ = false;
+    if (!captured || jpeg_data_.buf == nullptr || jpeg_data_.len == 0) {
+        return false;
+    }
+    out.assign(jpeg_data_.buf, jpeg_data_.buf + jpeg_data_.len);
+    return true;
+}
+
+std::string SscmaCamera::CaptureAndExplain(const std::string& question) {
+    std::lock_guard<std::recursive_mutex> lock(capture_mutex_);
+    if (!Capture()) {
+        throw std::runtime_error("Failed to capture photo");
+    }
+    return Explain(question);
 }
 
 /**
