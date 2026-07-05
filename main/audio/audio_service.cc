@@ -601,6 +601,24 @@ const std::string& AudioService::GetLastWakeWord() const {
     return wake_word_->GetLastDetectedWakeWord();
 }
 
+std::string AudioService::GetWakeWordConfigJson() const {
+    auto custom_wake_word = dynamic_cast<CustomWakeWord*>(wake_word_.get());
+    if (custom_wake_word == nullptr) {
+        return "{\"type\":\"unsupported\",\"runtimeConfigurable\":false}";
+    }
+    return custom_wake_word->GetConfigJson();
+}
+
+bool AudioService::ConfigureCustomWakeWord(const std::string& command, const std::string& display,
+                                           int threshold_percent, bool persist, std::string& error) {
+    auto custom_wake_word = dynamic_cast<CustomWakeWord*>(wake_word_.get());
+    if (custom_wake_word == nullptr) {
+        error = "custom wake word is not enabled in firmware";
+        return false;
+    }
+    return custom_wake_word->ConfigureWakeWord(command, display, threshold_percent, persist, error);
+}
+
 std::unique_ptr<AudioStreamPacket> AudioService::PopWakeWordPacket() {
     auto packet = std::make_unique<AudioStreamPacket>();
     if (wake_word_->GetWakeWordOpus(packet->payload)) {

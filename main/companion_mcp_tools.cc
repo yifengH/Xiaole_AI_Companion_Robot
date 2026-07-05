@@ -1,5 +1,6 @@
 #include "companion_mcp_tools.h"
 
+#include "application.h"
 #include "mcp_server.h"
 #include "alarm_manager.h"
 
@@ -21,6 +22,51 @@ constexpr int kDefaultAlarmRingDurationSeconds = (CONFIG_ALARM_NOTIFICATION_DURA
 // 而非焊进上游 mcp_server.cc。注册时机:application 初始化、AddCommonTools 之后。
 void AddCompanionMcpTools() {
     auto& mcp = McpServer::GetInstance();
+
+    // ---- Wake word tools ----
+
+    mcp.AddTool("self.wake_word.get_config",
+        "Get the current local wake word configuration. This returns whether runtime configuration is supported, "
+        "the pinyin command, display text, threshold, language, and model type.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            return Application::GetInstance().GetAudioService().GetWakeWordConfigJson();
+        });
+
+    mcp.AddTool("self.wake_word.set_custom",
+        "Set the local custom wake word used by the device. "
+        "Only works when firmware is built with CONFIG_USE_CUSTOM_WAKE_WORD. "
+        "Use pinyin separated by spaces for Chinese wake words, for example `xiao le xiao le`. "
+        "The display field is the text shown/reported after detection, for example `小乐小乐`. "
+        "The threshold range is 1-99; smaller is more sensitive. Persist=true stores the setting in NVS.",
+        PropertyList({
+            Property("command", kPropertyTypeString),
+            Property("display", kPropertyTypeString),
+            Property("threshold", kPropertyTypeInteger, 20, 1, 99),
+            Property("persist", kPropertyTypeBoolean, true),
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto command = properties["command"].value<std::string>();
+            auto display = properties["display"].value<std::string>();
+            int threshold = properties["threshold"].value<int>();
+            bool persist = properties["persist"].value<bool>();
+            std::string error;
+            bool ok = Application::GetInstance().GetAudioService().ConfigureCustomWakeWord(
+                command, display, threshold, persist, error);
+
+            cJSON* json = cJSON_CreateObject();
+            cJSON_AddBoolToObject(json, "success", ok);
+            cJSON_AddStringToObject(json, "tool", "self.wake_word.set_custom");
+            if (ok) {
+                cJSON_AddStringToObject(json, "command", command.c_str());
+                cJSON_AddStringToObject(json, "display", display.c_str());
+                cJSON_AddNumberToObject(json, "threshold", threshold);
+                cJSON_AddBoolToObject(json, "persist", persist);
+            } else {
+                cJSON_AddStringToObject(json, "message", error.c_str());
+            }
+            return json;
+        });
 
     // ---- Alarm tools ----
 

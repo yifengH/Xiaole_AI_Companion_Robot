@@ -13,6 +13,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <mutex>
 
 #include "audio_codec.h"
 #include "wake_word.h"
@@ -31,6 +32,8 @@ public:
     void EncodeWakeWordData();
     bool GetWakeWordOpus(std::vector<uint8_t>& opus);
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
+    bool ConfigureWakeWord(const std::string& command, const std::string& text, int threshold_percent, bool persist, std::string& error);
+    std::string GetConfigJson() const;
 
 private:
     struct Command {
@@ -48,6 +51,7 @@ private:
     int duration_ = 3000;
     float threshold_ = 0.2;
     std::deque<Command> commands_;
+    mutable std::mutex config_mutex_;
  
     std::function<void(const std::string& wake_word)> wake_word_detected_callback_;
     AudioCodec* codec_ = nullptr;
@@ -66,6 +70,8 @@ private:
 
     void StoreWakeWordData(const std::vector<int16_t>& data);
     void ParseWakenetModelConfig();
+    void LoadPersistedConfig();
+    bool ApplyWakeWordConfigLocked(const std::string& command, const std::string& text, int threshold_percent, std::string& error);
 };
 
 #endif
