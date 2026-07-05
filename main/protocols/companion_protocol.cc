@@ -20,6 +20,7 @@
 
 namespace {
 constexpr size_t kMaxVisionFrameBytes = 512 * 1024;
+constexpr size_t kMaxCameraNameBytes = 64;
 }
 
 CompanionProtocol::CompanionProtocol() {
@@ -108,19 +109,24 @@ bool CompanionProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     return websocket_->Send(serialized.data(), serialized.size(), true);
 }
 
-bool CompanionProtocol::SendImage(const uint8_t* jpeg, size_t len) {
+bool CompanionProtocol::SendImage(const std::string& camera_name, const uint8_t* jpeg, size_t len) {
     if (websocket_ == nullptr || !websocket_->IsConnected()) {
         return false;
     }
     if (jpeg == nullptr || len == 0 || len > kMaxVisionFrameBytes) {
         return false;
     }
+    if (camera_name.empty() || camera_name.size() > kMaxCameraNameBytes) {
+        return false;
+    }
 
-    // 上行二进制帧:首字节 0x02 = JPEG 图像帧,其后是裸 JPEG。
+    // 上行二进制帧:[0x02][cameraNameLen uint8][cameraName UTF-8][JPEG]。
     std::string serialized;
-    serialized.resize(1 + len);
+    serialized.resize(2 + camera_name.size() + len);
     serialized[0] = 0x02;
-    memcpy(serialized.data() + 1, jpeg, len);
+    serialized[1] = static_cast<char>(camera_name.size());
+    memcpy(serialized.data() + 2, camera_name.data(), camera_name.size());
+    memcpy(serialized.data() + 2 + camera_name.size(), jpeg, len);
     return websocket_->Send(serialized.data(), serialized.size(), true);
 }
 

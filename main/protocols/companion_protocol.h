@@ -27,7 +27,7 @@ public:
 
     bool Start() override;
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
-    bool SendImage(const uint8_t* jpeg, size_t len) override;
+    bool SendImage(const std::string& camera_name, const uint8_t* jpeg, size_t len) override;
     bool OpenAudioChannel() override;
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;

@@ -43,6 +43,7 @@ constexpr size_t kVisionMaxFrameBytes =
 #else
     512 * 1024;
 #endif
+constexpr const char* kVisionCameraName = "硬件前置摄像头";
 
 bool IsUtf8ContinuationByte(unsigned char ch) {
     return (ch & 0xC0) == 0x80;
@@ -1049,7 +1050,7 @@ void Application::VisionLoop() {
                         return;
                     }
                     if (protocol_ != nullptr && protocol_->IsAudioChannelOpened()) {
-                        protocol_->SendImage(frame.data(), frame.size());
+                        protocol_->SendImage(kVisionCameraName, frame.data(), frame.size());
                     }
                     if (vision_generation_.load() == generation) {
                         vision_frame_pending_.store(false);

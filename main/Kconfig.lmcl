@@ -82,8 +82,8 @@ menu "LMCL Vision Uplink"
         help
             When the board has a camera and the Companion websocket is open,
             periodically capture a JPEG frame and send it as binary frame
-            [0x02][JPEG] on /agent/v1. The server decides at model runtime
-            whether the frame is used.
+            [0x02][cameraNameLen][cameraName][JPEG] on /agent/v1. The
+            server decides at model runtime whether the frame is used.
 
     config LMCL_VISION_FRAME_INTERVAL_MS
         int "Vision frame interval (ms)"
