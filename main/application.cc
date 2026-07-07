@@ -43,7 +43,7 @@ constexpr size_t kVisionMaxFrameBytes =
 #else
     512 * 1024;
 #endif
-constexpr const char* kVisionCameraName = "硬件前置摄像头";
+constexpr const char* kVisionCameraName = "前置";
 
 bool IsUtf8ContinuationByte(unsigned char ch) {
     return (ch & 0xC0) == 0x80;
