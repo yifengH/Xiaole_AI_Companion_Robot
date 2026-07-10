@@ -186,6 +186,7 @@ private:
     void CheckAssetsVersion();
     void InitializeProtocol();
     void EnsureAudioChannelOpen();  // 常驻连接:确保 WSS 已连(未连则发起,成功后回到待唤醒)
+    void StartTimeSync();
     void StartVisionLoop();
     void StopVisionLoop();
     void VisionLoop();

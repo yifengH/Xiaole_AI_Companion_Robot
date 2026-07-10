@@ -53,7 +53,13 @@ private:
     // 端侧收敛在协议层:不发 listen 帧、丢弃上行音频(服务端不会消费)。默认 true。
     bool voice_enabled_ = true;
 
+    uint64_t audio_upload_bytes_ = 0;
+    uint32_t audio_upload_packets_ = 0;
+    uint64_t audio_upload_send_time_us_ = 0;
+    int64_t audio_upload_window_start_us_ = 0;
+
     void ParseServerReady(const cJSON* root);
+    void RecordAudioUpload(size_t bytes, int64_t send_time_us);
     bool SendText(const std::string& text) override;
     // 常驻连接专用超时(显著大于契约 ~150s 离线窗口),覆盖基类默认的 120s。
     bool IsTimeout() const override;

@@ -298,6 +298,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
             } else {
                 ESP_LOGW(TAG, "System time is not set, tm_year: %d", tm->tm_year);
             }
+            last_status_update_time_ = std::chrono::system_clock::now();
         }
     }
 

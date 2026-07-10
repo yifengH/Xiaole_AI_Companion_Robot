@@ -657,13 +657,17 @@ void AudioService::EnableWakeWordDetection(bool enable) {
     }
 }
 
+void AudioService::PrepareVoiceProcessing() {
+    if (!audio_processor_initialized_) {
+        audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS, models_list_);
+        audio_processor_initialized_ = true;
+    }
+}
+
 void AudioService::EnableVoiceProcessing(bool enable) {
     ESP_LOGD(TAG, "%s voice processing", enable ? "Enabling" : "Disabling");
     if (enable) {
-        if (!audio_processor_initialized_) {
-            audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS, models_list_);
-            audio_processor_initialized_ = true;
-        }
+        PrepareVoiceProcessing();
 
         /* We should make sure no audio is playing */
         ResetDecoder();
@@ -699,10 +703,7 @@ void AudioService::EnableAudioTesting(bool enable) {
 
 void AudioService::EnableDeviceAec(bool enable) {
     ESP_LOGI(TAG, "%s device AEC", enable ? "Enabling" : "Disabling");
-    if (!audio_processor_initialized_) {
-        audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS, models_list_);
-        audio_processor_initialized_ = true;
-    }
+    PrepareVoiceProcessing();
 
     audio_processor_->EnableDeviceAec(enable);
 }

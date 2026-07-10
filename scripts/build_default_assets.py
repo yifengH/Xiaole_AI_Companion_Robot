@@ -260,6 +260,25 @@ def process_emoji_collection(emoji_collection_dir, assets_dir):
                                 "file": file
                             })
     
+    # A custom collection may intentionally contain only a subset of Xiaozhi's
+    # standard emotions. Make every missing emotion fall back to neutral so
+    # the display never goes blank when the server sends an unsupported name.
+    standard_emotions = [
+        "neutral", "happy", "laughing", "funny", "sad", "angry",
+        "crying", "loving", "embarrassed", "surprised", "shocked",
+        "thinking", "winking", "cool", "relaxed", "delicious", "kissy",
+        "confident", "sleepy", "silly", "confused", "idle"
+    ]
+    emoji_names = {entry["name"] for entry in emoji_list}
+    neutral_entry = next((entry for entry in emoji_list if entry["name"] == "neutral"), None)
+    if neutral_entry:
+        for emotion in standard_emotions:
+            if emotion not in emoji_names:
+                emoji_list.append({
+                    "name": emotion,
+                    "file": neutral_entry["file"]
+                })
+
     return emoji_list
 
 
@@ -718,6 +737,10 @@ def get_emoji_collection_path(default_emoji_collection, xiaozhi_fonts_path, proj
     """
     if not default_emoji_collection:
         return None
+
+    # Allow board configurations to point at a project-local custom collection.
+    if os.path.isdir(default_emoji_collection):
+        return os.path.abspath(default_emoji_collection)
     
     # Special handling for otto-gif collection
     if default_emoji_collection == 'otto-gif':

@@ -9,8 +9,10 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <cstdio>
 #include <cJSON.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <esp_app_desc.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -21,6 +23,19 @@
 namespace {
 constexpr size_t kMaxVisionFrameBytes = 512 * 1024;
 constexpr size_t kMaxCameraNameBytes = 64;
+constexpr int64_t kAudioUploadLogIntervalUs = 2 * 1000 * 1000;
+
+const char* FormatRate(uint64_t bytes, int64_t elapsed_us, char* buffer, size_t buffer_size) {
+    if (elapsed_us <= 0 || buffer_size == 0) {
+        snprintf(buffer, buffer_size, "0.0");
+        return buffer;
+    }
+    uint64_t rate_x10 = bytes * 10000000ULL / static_cast<uint64_t>(elapsed_us) / 1024ULL;
+    snprintf(buffer, buffer_size, "%u.%u",
+             static_cast<unsigned>(rate_x10 / 10),
+             static_cast<unsigned>(rate_x10 % 10));
+    return buffer;
+}
 }
 
 CompanionProtocol::CompanionProtocol() {
@@ -106,7 +121,13 @@ bool CompanionProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     serialized.resize(1 + packet->payload.size());
     serialized[0] = 0x01;
     memcpy(serialized.data() + 1, packet->payload.data(), packet->payload.size());
-    return websocket_->Send(serialized.data(), serialized.size(), true);
+    int64_t start_us = esp_timer_get_time();
+    bool ok = websocket_->Send(serialized.data(), serialized.size(), true);
+    int64_t send_time_us = esp_timer_get_time() - start_us;
+    if (ok) {
+        RecordAudioUpload(serialized.size(), send_time_us);
+    }
+    return ok;
 }
 
 bool CompanionProtocol::SendImage(const std::string& camera_name, const uint8_t* jpeg, size_t len) {
@@ -127,7 +148,51 @@ bool CompanionProtocol::SendImage(const std::string& camera_name, const uint8_t*
     serialized[1] = static_cast<char>(camera_name.size());
     memcpy(serialized.data() + 2, camera_name.data(), camera_name.size());
     memcpy(serialized.data() + 2 + camera_name.size(), jpeg, len);
-    return websocket_->Send(serialized.data(), serialized.size(), true);
+    int64_t start_us = esp_timer_get_time();
+    bool ok = websocket_->Send(serialized.data(), serialized.size(), true);
+    int64_t send_time_us = esp_timer_get_time() - start_us;
+    if (ok) {
+        char rate[24];
+        ESP_LOGI(TAG, "Upload image: camera=%s payload=%u bytes frame=%u bytes send=%d ms rate=%s KB/s",
+                 camera_name.c_str(),
+                 static_cast<unsigned>(len),
+                 static_cast<unsigned>(serialized.size()),
+                 static_cast<int>(send_time_us / 1000),
+                 FormatRate(serialized.size(), send_time_us, rate, sizeof(rate)));
+    }
+    return ok;
+}
+
+void CompanionProtocol::RecordAudioUpload(size_t bytes, int64_t send_time_us) {
+    int64_t now_us = esp_timer_get_time();
+    if (audio_upload_window_start_us_ == 0) {
+        audio_upload_window_start_us_ = now_us;
+    }
+
+    audio_upload_bytes_ += bytes;
+    audio_upload_packets_++;
+    audio_upload_send_time_us_ += send_time_us > 0 ? send_time_us : 0;
+
+    int64_t elapsed_us = now_us - audio_upload_window_start_us_;
+    if (elapsed_us < kAudioUploadLogIntervalUs) {
+        return;
+    }
+
+    char rate[24];
+    uint32_t avg_send_us = audio_upload_packets_ > 0
+        ? static_cast<uint32_t>(audio_upload_send_time_us_ / audio_upload_packets_)
+        : 0;
+    ESP_LOGI(TAG, "Upload audio: packets=%u bytes=%u window=%d ms rate=%s KB/s avg_send=%u us",
+             static_cast<unsigned>(audio_upload_packets_),
+             static_cast<unsigned>(audio_upload_bytes_),
+             static_cast<int>(elapsed_us / 1000),
+             FormatRate(audio_upload_bytes_, elapsed_us, rate, sizeof(rate)),
+             static_cast<unsigned>(avg_send_us));
+
+    audio_upload_bytes_ = 0;
+    audio_upload_packets_ = 0;
+    audio_upload_send_time_us_ = 0;
+    audio_upload_window_start_us_ = now_us;
 }
 
 bool CompanionProtocol::SendText(const std::string& text) {
@@ -316,8 +381,8 @@ bool CompanionProtocol::ShouldDropStaleTextFrame(const char* type, const cJSON* 
     }
 
     if (low8 != current_turn_low8_) {
-        ESP_LOGW(TAG, "Drop stale %s frame turnId=%lld currentLow8=%u",
-                 type, id, current_turn_low8_);
+        ESP_LOGW(TAG, "Drop stale %s frame turnIdLow8=%u currentLow8=%u",
+                 type, static_cast<unsigned>(low8), current_turn_low8_);
         return true;
     }
 

@@ -28,6 +28,18 @@ size_t AppendJpegChunk(void* arg, size_t index, const void* data, size_t len) {
     out->insert(out->end(), bytes, bytes + len);
     return len;
 }
+
+const char* FormatUploadRate(uint64_t bytes, int64_t elapsed_us, char* buffer, size_t buffer_size) {
+    if (elapsed_us <= 0 || buffer_size == 0) {
+        snprintf(buffer, buffer_size, "0.0");
+        return buffer;
+    }
+    uint64_t rate_x10 = bytes * 10000000ULL / static_cast<uint64_t>(elapsed_us) / 1024ULL;
+    snprintf(buffer, buffer_size, "%u.%u",
+             static_cast<unsigned>(rate_x10 / 10),
+             static_cast<unsigned>(rate_x10 % 10));
+    return buffer;
+}
 }
 
 Esp32Camera::Esp32Camera(const camera_config_t &config) {
@@ -343,6 +355,8 @@ std::string Esp32Camera::Explain(const std::string &question) {
         throw std::runtime_error("Failed to connect to explain URL");
     }
 
+    int64_t upload_start_us = esp_timer_get_time();
+    size_t total_uploaded = 0;
     {
         std::string question_field;
         question_field += "--" + boundary + "\r\n";
@@ -350,6 +364,7 @@ std::string Esp32Camera::Explain(const std::string &question) {
         question_field += "\r\n";
         question_field += question + "\r\n";
         http->Write(question_field.c_str(), question_field.size());
+        total_uploaded += question_field.size();
     }
     {
         std::string file_header;
@@ -358,6 +373,7 @@ std::string Esp32Camera::Explain(const std::string &question) {
         file_header += "Content-Type: image/jpeg\r\n";
         file_header += "\r\n";
         http->Write(file_header.c_str(), file_header.size());
+        total_uploaded += file_header.size();
     }
 
     size_t total_sent = 0;
@@ -374,6 +390,7 @@ std::string Esp32Camera::Explain(const std::string &question) {
         }
         http->Write((const char *)chunk.data, chunk.len);
         total_sent += chunk.len;
+        total_uploaded += chunk.len;
         heap_caps_free(chunk.data);
     }
     encoder_thread_.join();
@@ -388,8 +405,16 @@ std::string Esp32Camera::Explain(const std::string &question) {
         std::string multipart_footer;
         multipart_footer += "\r\n--" + boundary + "--\r\n";
         http->Write(multipart_footer.c_str(), multipart_footer.size());
+        total_uploaded += multipart_footer.size();
     }
     http->Write("", 0);
+    int64_t upload_elapsed_us = esp_timer_get_time() - upload_start_us;
+    char upload_rate[24];
+    ESP_LOGI(TAG, "Upload photo HTTP: jpeg=%u bytes body=%u bytes send=%d ms rate=%s KB/s",
+             static_cast<unsigned>(total_sent),
+             static_cast<unsigned>(total_uploaded),
+             static_cast<int>(upload_elapsed_us / 1000),
+             FormatUploadRate(total_uploaded, upload_elapsed_us, upload_rate, sizeof(upload_rate)));
 
     if (http->GetStatusCode() != 200) {
         ESP_LOGE(TAG, "Failed to upload photo, status code: %d", http->GetStatusCode());

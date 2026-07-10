@@ -17,10 +17,13 @@
 #include <cstdlib>
 #include <vector>
 #include <esp_log.h>
+#include <esp_netif_sntp.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#include <sys/time.h>
+#include <time.h>
 
 #define TAG "Application"
 
@@ -71,6 +74,16 @@ uint32_t EstimateTtsCaptionDurationMs(const std::string& text) {
     estimate = std::max<uint64_t>(estimate, kMinDurationMs);
     estimate = std::min<uint64_t>(estimate, kMaxDurationMs);
     return static_cast<uint32_t>(estimate);
+}
+
+void OnTimeSynced(struct timeval* tv) {
+    time_t now = tv->tv_sec;
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+
+    char time_str[32];
+    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    ESP_LOGI(TAG, "System time synchronized: %s", time_str);
 }
 }
 
@@ -364,6 +377,7 @@ void Application::Run() {
 void Application::HandleNetworkConnectedEvent() {
     ESP_LOGI(TAG, "Network connected");
     network_ready_ = true;
+    StartTimeSync();
     last_reconnect_tick_ = -1000;  // 网络刚就绪,允许立即(重)连
     auto state = GetDeviceState();
 
@@ -431,6 +445,7 @@ void Application::ActivationTask() {
 
     // Check for new assets version(设备内部资源分区,非接入协议)
     CheckAssetsVersion();
+    audio_service_.PrepareVoiceProcessing();
 
     // OTA 后首次正常启动 → 标记当前固件有效,取消回滚。固件更新检测由 HTTP 控制面驱动。
     ota_->MarkCurrentVersionValid();
@@ -565,7 +580,6 @@ void Application::InitializeProtocol() {
             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
                 protocol_->server_sample_rate(), codec->output_sample_rate());
         }
-        StartVisionLoop();
         // 通道打开后顺带查一次 OTA(开机/重连后即查;之后主循环每 ~10min 周期查)。触发源为 HTTP
         // CheckFirmwareUpdate(旧链路是 WSS checkUpdate/update 帧,已移除)。
         Schedule([this]() {
@@ -839,9 +853,6 @@ void Application::HandleWakeWordDetectedEvent() {
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
     if (state == kDeviceStateIdle) {
-        audio_service_.EncodeWakeWord();
-        auto wake_word = audio_service_.GetLastWakeWord();
-
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update),
@@ -919,13 +930,20 @@ void Application::HandleStateChangedEvent() {
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
+            if (protocol_ != nullptr && protocol_->IsAudioChannelOpened()) {
+                StartVisionLoop();
+            }
             break;
         case kDeviceStateConnecting:
+            StopVisionLoop();
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
+            if (protocol_ != nullptr && protocol_->IsAudioChannelOpened()) {
+                StartVisionLoop();
+            }
             last_activity_tick_ = clock_ticks_;   // 进入监听:从此刻起计本地空闲
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
@@ -958,6 +976,7 @@ void Application::HandleStateChangedEvent() {
             }
             break;
         case kDeviceStateSpeaking:
+            StopVisionLoop();
             display->SetStatus(Lang::Strings::SPEAKING);
 
             if (listening_mode_ != kListeningModeRealtime) {
@@ -982,6 +1001,32 @@ void Application::Schedule(std::function<void()>&& callback) {
         main_tasks_.push_back(std::move(callback));
     }
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
+}
+
+void Application::StartTimeSync() {
+    setenv("TZ", "CST-8", 1);
+    tzset();
+
+    static bool sntp_started = false;
+    if (sntp_started) {
+        esp_netif_sntp_start();
+        return;
+    }
+
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+    config.sync_cb = OnTimeSynced;
+    config.wait_for_sync = false;
+
+    esp_err_t err = esp_netif_sntp_init(&config);
+    if (err == ESP_OK) {
+        sntp_started = true;
+        ESP_LOGI(TAG, "SNTP time sync started");
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        sntp_started = true;
+        ESP_LOGI(TAG, "SNTP time sync already started");
+    } else {
+        ESP_LOGW(TAG, "Failed to start SNTP time sync: %s", esp_err_to_name(err));
+    }
 }
 
 void Application::StartVisionLoop() {
@@ -1220,8 +1265,6 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     auto state = GetDeviceState();
     
     if (state == kDeviceStateIdle) {
-        audio_service_.EncodeWakeWord();
-
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
