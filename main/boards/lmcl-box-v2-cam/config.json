@@ -6,7 +6,7 @@
             "sdkconfig_append": [
                 "CONFIG_BOARD_TYPE_LMCL_BOX_V2_CAM=y",
                 "CONFIG_DEVICE_MODEL_CODE=\"lmcl-box-v2-cam\"",
-                "CONFIG_LMCL_SN_PREFIX=\"lmcl-cam-\"",
+                "CONFIG_LMCL_SN_PREFIX=\"LMCL\"",
                 "CONFIG_USE_DEVICE_AEC=y",
                 "# CONFIG_USE_AFE_WAKE_WORD is not set",
                 "CONFIG_USE_CUSTOM_WAKE_WORD=y",
@@ -21,7 +21,9 @@
                 "CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=n",
                 "CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_1=y",
                 "CONFIG_LV_USE_FONT_COMPRESSED=y",
-                "CONFIG_LV_USE_FONT_PLACEHOLDER=y"
+                "CONFIG_LV_USE_FONT_PLACEHOLDER=y",
+                "# CONFIG_USE_DEFAULT_MESSAGE_STYLE is not set",
+                "CONFIG_USE_WECHAT_MESSAGE_STYLE=y"
             ]
         }
     ]

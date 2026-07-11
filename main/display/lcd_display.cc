@@ -31,9 +31,9 @@ void LcdDisplay::InitializeLcdThemes() {
     auto light_theme = new LvglTheme("light");
     light_theme->set_background_color(lv_color_hex(0xFFFFFF));
     light_theme->set_text_color(lv_color_hex(0x000000));
-    light_theme->set_chat_background_color(lv_color_hex(0xE0E0E0));
-    light_theme->set_user_bubble_color(lv_color_hex(0x00FF00));
-    light_theme->set_assistant_bubble_color(lv_color_hex(0xDDDDDD));
+    light_theme->set_chat_background_color(lv_color_hex(0xEDEDED));
+    light_theme->set_user_bubble_color(lv_color_hex(0x95EC69));
+    light_theme->set_assistant_bubble_color(lv_color_hex(0xFFFFFF));
     light_theme->set_system_bubble_color(lv_color_hex(0xFFFFFF));
     light_theme->set_system_text_color(lv_color_hex(0x000000));
     light_theme->set_border_color(lv_color_hex(0x000000));
@@ -493,6 +493,7 @@ void LcdDisplay::SetupUI() {
 
     emoji_image_ = lv_img_create(screen);
     lv_obj_align(emoji_image_, LV_ALIGN_TOP_MID, 0, text_font->line_height + lvgl_theme->spacing(8));
+    lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
 
     // Display AI logo while booting
     emoji_label_ = lv_label_create(screen);
@@ -500,6 +501,7 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_text_font(emoji_label_, large_icon_font, 0);
     lv_obj_set_style_text_color(emoji_label_, lvgl_theme->text_color(), 0);
     lv_label_set_text(emoji_label_, FONT_AWESOME_MICROCHIP_AI);
+    lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
 }
 #if CONFIG_IDF_TARGET_ESP32P4
 #define  MAX_MESSAGES 40
@@ -507,6 +509,9 @@ void LcdDisplay::SetupUI() {
 #define  MAX_MESSAGES 20
 #endif
 void LcdDisplay::SetChatMessage(const char* role, const char* content) {
+    if (role == nullptr || content == nullptr || content[0] == '\0') {
+        return;
+    }
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetChatMessage('%s', '%s') called before SetupUI() - message will be lost!", role, content);
     }
@@ -562,11 +567,6 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
         lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
     }
 
-    // Avoid empty message boxes
-    if(strlen(content) == 0) {
-        return;
-    }
-
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
 
     // Create a message bubble
@@ -581,7 +581,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     lv_label_set_text(msg_text, content);
     
     // Calculate bubble width constraints
-    lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;  // 85% of screen width
+    lv_coord_t max_width = LV_HOR_RES * 76 / 100;
     lv_coord_t min_width = 20;  
     
     // Let LVGL calculate the natural text width first
@@ -609,7 +609,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     if (strcmp(role, "user") == 0) {
         // User messages are right-aligned with green background
         lv_obj_set_style_bg_color(msg_bubble, lvgl_theme->user_bubble_color(), 0);
-        lv_obj_set_style_bg_opa(msg_bubble, LV_OPA_70, 0);
+        lv_obj_set_style_bg_opa(msg_bubble, LV_OPA_COVER, 0);
         // Set text color for contrast
         lv_obj_set_style_text_color(msg_text, lvgl_theme->text_color(), 0);
         
@@ -625,7 +625,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     } else if (strcmp(role, "assistant") == 0) {
         // Assistant messages are left-aligned with white background
         lv_obj_set_style_bg_color(msg_bubble, lvgl_theme->assistant_bubble_color(), 0);
-        lv_obj_set_style_bg_opa(msg_bubble, LV_OPA_70, 0);
+        lv_obj_set_style_bg_opa(msg_bubble, LV_OPA_COVER, 0);
         // Set text color for contrast
         lv_obj_set_style_text_color(msg_text, lvgl_theme->text_color(), 0);
         
@@ -641,7 +641,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     } else if (strcmp(role, "system") == 0) {
         // System messages are center-aligned with light gray background
         lv_obj_set_style_bg_color(msg_bubble, lvgl_theme->system_bubble_color(), 0);
-        lv_obj_set_style_bg_opa(msg_bubble, LV_OPA_70, 0);
+        lv_obj_set_style_bg_opa(msg_bubble, LV_OPA_COVER, 0);
         // Set text color for contrast
         lv_obj_set_style_text_color(msg_text, lvgl_theme->system_text_color(), 0);
         
@@ -660,7 +660,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     if (strcmp(role, "user") == 0) {
         // Create a full-width container
         lv_obj_t* container = lv_obj_create(content_);
-        lv_obj_set_width(container, LV_HOR_RES);
+        lv_obj_set_width(container, LV_PCT(100));
         lv_obj_set_height(container, LV_SIZE_CONTENT);
         
         // Make container transparent and borderless
@@ -672,14 +672,14 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
         lv_obj_set_parent(msg_bubble, container);
         
         // Right align the bubble in the container
-        lv_obj_align(msg_bubble, LV_ALIGN_RIGHT_MID, -25, 0);
+        lv_obj_align(msg_bubble, LV_ALIGN_RIGHT_MID, 0, 0);
         
         // Auto-scroll to this container
         lv_obj_scroll_to_view_recursive(container, LV_ANIM_ON);
     } else if (strcmp(role, "system") == 0) {
         // Create full-width container for system messages to ensure center alignment
         lv_obj_t* container = lv_obj_create(content_);
-        lv_obj_set_width(container, LV_HOR_RES);
+        lv_obj_set_width(container, LV_PCT(100));
         lv_obj_set_height(container, LV_SIZE_CONTENT);
         
         lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, 0);
@@ -797,11 +797,6 @@ void LcdDisplay::ClearChatMessages() {
     
     // Reset chat_message_label_ as it has been deleted
     chat_message_label_ = nullptr;
-    
-    // Show the centered AI logo (emoji_label_) again
-    if (emoji_label_ != nullptr) {
-        lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-    }
     
     ESP_LOGI(TAG, "Chat messages cleared");
 }
@@ -1082,6 +1077,9 @@ void LcdDisplay::ClearChatMessages() {
 #endif
 
 void LcdDisplay::SetEmotion(const char* emotion) {
+    if (emotion == nullptr) {
+        return;
+    }
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI() - emotion will not be displayed!", emotion);
     }
@@ -1091,6 +1089,21 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         }
         return;
     }
+
+#if CONFIG_USE_WECHAT_MESSAGE_STYLE
+    {
+        DisplayLockGuard lock(this);
+        if (gif_controller_) {
+            gif_controller_->Stop();
+            gif_controller_.reset();
+        }
+        lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+        if (emoji_label_ != nullptr) {
+            lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    return;
+#endif
 
     auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
     auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;
@@ -1213,8 +1226,8 @@ void LcdDisplay::SetTheme(Theme* theme) {
 
     // If we have the chat message style, update all message bubbles
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE
-    // Set content background opacity
-    lv_obj_set_style_bg_opa(content_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_bg_color(content_, lvgl_theme->chat_background_color(), 0);
+    lv_obj_set_style_bg_opa(content_, LV_OPA_COVER, 0);
 
     // Iterate through all children of content (message containers or bubbles)
     uint32_t child_count = lv_obj_get_child_cnt(content_);

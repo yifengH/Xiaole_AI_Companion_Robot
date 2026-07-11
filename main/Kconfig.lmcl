@@ -37,11 +37,10 @@ config DEVICE_MODEL_CODE
 
 config LMCL_SN_PREFIX
     string "LMCL Serial Number prefix"
-    default "lmcl-cam-" if BOARD_TYPE_LMCL_BOX_V2_CAM
-    default "lmcl-"
+    default "LMCL"
     help
-        LMCL sn 前缀约定(如 "lmcl-")。产线工装生成出厂 (sn, secret) 烧入 NVS "identity"
-        时用此前缀。固件运行时**不读**它——device_identity 只读出厂预置 sn(不再首启自生成)。
+        LMCL sn 前缀约定。新设备缺少 identity/sn 时，开发身份使用此前缀加 MAC；
+        量产设备仍应由产线把完整 (sn, secret) 烧入 NVS "identity"。
 
 menu "Alarm Settings"
     config ALARM_RING_INTERVAL_SECONDS

@@ -25,6 +25,10 @@
 
 #define TAG "LmclBoxV2CamBoard"
 
+// Temporarily disabled while running conversation-memory tests. Keeping this as
+// one switch makes it easy to restore the complete camera path later.
+constexpr bool kCameraEnabled = false;
+
 //控制器初始化函数声明
 void InitializeMCPController();
 
@@ -85,7 +89,7 @@ private:
     Button volume_down_button_;
     LcdDisplay* display_ = nullptr;
     Pca9557* pca9557_;
-    Esp32Camera* camera_;
+    Esp32Camera* camera_ = nullptr;
     PowerManager* power_manager_ = new PowerManager(GPIO_NUM_47);
 
     void InitializeI2c() {
@@ -136,6 +140,11 @@ private:
             if (is_first_boot) {
                 ESP_LOGI(TAG, "首次启动，启用双击拍照功能");
                 auto camera = GetCamera();
+                if (camera == nullptr) {
+                    ESP_LOGW(TAG, "Camera is disabled; ignoring double-click capture");
+                    settings.SetInt(FIRST_BOOT_KEY, 0);
+                    return;
+                }
                 if (!camera->Capture()) {
                     ESP_LOGE(TAG, "Camera capture failed");
                 }
@@ -283,7 +292,13 @@ public:
         InitializeSpi();
         InitializeSt7789Display();
         InitializeButtons();
-        InitializeCamera();
+        if (kCameraEnabled) {
+            InitializeCamera();
+        } else {
+            // InitializeCamera() drives this line low to power the camera on.
+            pca9557_->SetOutputState(2, 1);
+            ESP_LOGW(TAG, "Camera disabled for conversation-memory testing");
+        }
 		InitializeController();
         GetBacklight()->RestoreBrightness();
     }
@@ -326,7 +341,7 @@ public:
     }
 
     virtual Camera* GetCamera() override {
-        return camera_;
+        return kCameraEnabled ? camera_ : nullptr;
     }
 };
 
